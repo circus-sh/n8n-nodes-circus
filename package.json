@@ -13,7 +13,7 @@
     },
     "repository": {
         "type": "git",
-        "url": "https://github.com/ivandudas/n8n-nodes-circus.git"
+        "url": "https://github.com/circus-sh/n8n-nodes-circus.git"
     },
     "scripts": {
         "build": "n8n-node build",
