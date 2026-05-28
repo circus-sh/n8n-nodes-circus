@@ -134,7 +134,7 @@ Snapshot entry structure:
   "model_id": 1,
   "model_name": "GPT-4o",
   "model_provider": "openai",
-  "model_api_url": "https://api.openai.com/v1/chat/completions",
+  "model_base_url": "https://api.openai.com/v1/chat/completions",
   "prompt_id": 12,
   "prompt_name": "Generate Script",
   "prompt_slug": "generate_script",
@@ -155,7 +155,7 @@ If no matching entry found:
 From the resolved snapshot entry, verify:
 - `model_provider` is defined and non-empty
 - `model_name` is defined and non-empty
-- `model_api_url` is defined and non-empty
+- `model_base_url` is defined and non-empty
 - Corresponding AI provider API key exists in n8n credentials (named `circus_{model_provider}_api_key`)
 - `max_tokens` is a positive integer
 - `temperature` is between 0 and 2 (inclusive)
@@ -185,7 +185,7 @@ The prompt and input are sent as separate messages so the AI provider sees the p
 
 **Step 4 — Build provider-specific request:**
 
-Read `model_api_url` from the snapshot. This is the endpoint the AI API call will be made to.
+Read `model_base_url` from the snapshot. This is the endpoint the AI API call will be made to.
 
 Read `model_provider` from the snapshot. Build the request body based on the provider:
 
@@ -238,7 +238,7 @@ The provider switch uses `model_provider` value. Unknown providers fall back to 
 
 **Step 5 — Execute AI API call:**
 
-Make the HTTP request to `model_api_url` with:
+Make the HTTP request to `model_base_url` with:
 - The provider-specific request body from Step 4
 - API key from n8n credentials (`circus_{model_provider}_api_key`)
 - Appropriate headers per provider (e.g. `Content-Type: application/json`, Anthropic requires `anthropic-version` header)
