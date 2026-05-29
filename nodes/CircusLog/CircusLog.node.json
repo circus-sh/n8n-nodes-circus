@@ -1,0 +1,18 @@
+{
+	"node": "n8n-nodes-circus.circusLog",
+	"nodeVersion": "1.0",
+	"codexVersion": "1.0",
+	"categories": ["Development", "Developer Tools"],
+	"resources": {
+		"credentialDocumentation": [
+			{
+				"url": "https://circus.sh/docs/n8n-nodes#credentials"
+			}
+		],
+		"primaryDocumentation": [
+			{
+				"url": "https://circus.sh/docs/n8n-nodes#log"
+			}
+		]
+	}
+}
