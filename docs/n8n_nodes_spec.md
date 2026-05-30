@@ -435,9 +435,10 @@ If the snapshot entry exists, the node assumes all values are valid and uses the
 **Step 2 — Resolve header variables:**
 
 For each header in the snapshot entry, check for `{{...}}` patterns. For each variable:
-1. Look up in n8n credentials first
-2. Fall back to n8n environment variables
-3. If not found: call `/logs` with a warning log explaining the unresolved variable. Do NOT halt the workflow — let the API call proceed (it may still succeed, or the external service error will be caught in Step 3).
+1. Look up in n8n environment variables via the workflow data proxy (`$env`). The user must configure these as environment variables on their n8n instance (e.g. `ELEVENLABS_API_KEY=sk-xxx` in the `.env` file or Docker environment).
+2. If not found: call `/logs` with a warning log explaining the unresolved variable. Do NOT halt the workflow — let the API call proceed (it may still succeed, or the external service error will be caught in Step 3).
+
+n8n credentials (`getCredentials()`) are not used for header variable resolution because credential types must be declared statically in the node's description — they cannot be resolved dynamically from snapshot data at runtime.
 
 Use `compiled_api_url` from the snapshot (URL variables already resolved by the platform).
 
