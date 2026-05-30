@@ -1,6 +1,6 @@
 # Circus n8n Nodes — Detailed Specification
 
-This document defines six custom n8n nodes for the Circus AI Workflow Orchestration Platform. It includes exact API endpoints, field names, types, and request/response structures from the core API contract.
+This document defines five custom n8n nodes for the Circus AI Workflow Orchestration Platform. It includes exact API endpoints, field names, types, and request/response structures from the core API contract.
 
 ---
 
@@ -101,17 +101,14 @@ Enables operator-controlled AI execution. The operator configures models, prompt
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `agentSlug` | string | Yes | — | Agent slug matching an entry in `workflow_config_snapshot.agent_assignments[].agent_slug` |
-| `inputText` | string | Yes | — | The work item to process. Supports n8n expressions — can reference previous node output, webhook payload fields (e.g. workspace snapshot), or static text. Sent as a separate user message after the prompt. |
+| `inputText` | string | No | — | The work item to process. Supports n8n expressions — can reference previous node output, webhook payload fields (e.g. workspace snapshot), or static text. Sent as a separate user message after the prompt. |
 | `includeSystemContext` | boolean | No | false | Whether to include system context entries in the prompt |
 | `systemContextEntries` | string[] | No | all | Specific system context keys to include (if `includeSystemContext` is true). Empty means all. |
 | `missingContextBehavior` | enum | No | `ignore` | How to handle missing system context entries: `ignore`, `ignore_and_report`, `fail` |
 
 **Advanced/Settings tab:**
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `enableRetries` | boolean | No | false | Enable automatic retries on AI API call failure |
-| `maxRetries` | number | No | 0 | Number of retry attempts (only if retries enabled) |
+No custom retry configuration. Use n8n's built-in "Retry On Fail" setting (in the node's Settings tab) for transient AI API failures. See Step 8 for how the node handles errors based on the user's On Error configuration.
 
 ### Runtime Behavior
 
@@ -147,8 +144,8 @@ Snapshot entry structure:
 
 If no matching entry found:
 1. Call `POST /api/machine/workflow-executions/:executionId/logs` with error log
-2. Call `POST /api/machine/workflow-executions/:executionId/terminate` with reason: `"Agent slug '{agentSlug}' not found in workflow configuration snapshot"`
-3. Throw n8n NodeOperationError to halt the workflow
+2. Call `POST /api/machine/workflow-executions/:executionId/terminate` with `external_execution_id` and reason: `"Agent slug '{agentSlug}' not found in workflow configuration snapshot"`
+3. Throw validation error.
 
 **Step 2 — Validate agent parameters:**
 
@@ -162,8 +159,8 @@ From the resolved snapshot entry, verify:
 
 If any validation fails:
 1. Call `/logs` endpoint with error log
-2. Call `/terminate` endpoint with reason describing the missing parameter.
-3. Halt the workflow
+2. Call `/terminate` endpoint with `external_execution_id` and reason describing the missing parameter.
+3. Throw validation error.
 
 **Step 3 — Build prompt with system context:**
 
@@ -174,7 +171,7 @@ If `includeSystemContext` is true:
   - For each specified key not found in `system_snapshot.system_context`, apply `missingContextBehavior`:
     - `ignore`: skip silently
     - `ignore_and_report`: skip, but call `/logs` with a warning log reporting the missing key
-    - `fail`: call `/logs` with error, call `/terminate`, halt workflow
+    - `fail`: call `/logs` with error, call `/terminate` with `external_execution_id`, throw validation error
 
 Assemble the final prompt in three parts:
 - **System message:** system context entries (concatenated or structured as key-value pairs)
@@ -311,7 +308,8 @@ Call `POST /api/machine/workflow-executions/:executionId/logs`
   "output_size": 340,
   "error_message": "only if status is error",
   "request_payload": { "the prompt and parameters sent to AI API" },
-  "response_payload": { "the AI API response" }
+  "response_payload": { "the AI API response" },
+  "external_execution_id": "{n8n's internal execution ID}"
 }
 ```
 
@@ -332,16 +330,30 @@ The `/logs` endpoint returns:
 ```
 
 If `abort` is `true`:
-1. Call `POST /api/machine/workflow-executions/:executionId/terminate` with reason: `"Execution aborted: cost or time threshold exceeded"`
-2. Halt the workflow
+1. Call `POST /api/machine/workflow-executions/:executionId/terminate` with `external_execution_id` and reason: `"Execution aborted: cost or time threshold exceeded"`
+2. Throw an error with "Execution aborted: cost or time threshold exceeded"
 
-**Step 8 — Handle errors with retries:**
+**Step 8 — Handle errors:**
 
-If the AI API call returned an error:
-- If retries enabled and not exhausted: go back to Step 5 (each retry also logs via Step 7, with its own idempotency key)
-- If retries exhausted or not enabled:
-  1. Call `/terminate` with reason describing the error
-  2. Halt the workflow
+If the AI API call returned an error, the error is already logged in Step 7. The node then throws `NodeOperationError`.
+
+**Path 1 — On Error: Stop Workflow (n8n built-in, recommended):**
+
+- If "Retry On Fail" is enabled:
+  - Do NOT call `/terminate` — let n8n retry.
+  - Throw `NodeOperationError`. n8n may repeat the entire node's execute() from scratch. This will include new validation, a new AI API call (with additional cost), and new logs via Step 7 with a new idempotency key.
+  - The node cannot know if retries are exhausted. If n8n eventually gives up, the Circus background service detects the stale execution and marks it as failed.
+- If "Retry On Fail" is not enabled:
+  - Call `/terminate` with `external_execution_id` immediately — no retry is coming.
+  - Throw `NodeOperationError`.
+
+**Path 2 — On Error: anything other than "Stop Workflow" (Continue variants):**
+
+The node detects this via `this.continueOnFail()`. Instead of letting n8n continue in a broken state:
+
+1. Call `/terminate` with `external_execution_id` to trigger remote termination. The platform calls n8n's `POST /api/v1/executions/{id}/stop` to kill the execution.
+2. Throw `NodeOperationError`.
+3. n8n catches the error and retries or continues — but the platform's remote stop kills the execution. The remote termination may arrive after n8n has already continued to the next node, but that is acceptable.
 
 **Step 9 — Success output:**
 
@@ -383,7 +395,8 @@ Executes external service API calls using configuration from the service_config_
 |-------|------|----------|---------|-------------|
 | `requestBody` | json | No | — | Payload to send with the API call. Works like n8n's HTTP Request node — developer configures freely. |
 
-No retry, URL, headers, or method configuration — all provided by the snapshot.
+URL, headers, or method configuration — all provided by the snapshot.
+Retry settings provided in the snapshot are ignored. Retries configured by n8n's built-in settings tab.
 
 ### Runtime Behavior
 
@@ -412,10 +425,10 @@ Snapshot entry structure:
 }
 ```
 
-If no matching entry found:
+If no matching entry found (permanent failure):
 1. Call `/logs` with error log
-2. Call `/terminate` with reason: `"Service slug '{serviceSlug}' not found in service configuration snapshot"`
-3. Halt the workflow
+2. Call `/terminate` with `external_execution_id` and reason: `"Service slug '{serviceSlug}' not found in service configuration snapshot"`
+3. Throw `NodeOperationError` with the same message. If On Error is "Stop Workflow", n8n halts. If On Error is "Continue", the platform's remote stop kills the execution.
 
 If the snapshot entry exists, the node assumes all values are valid and uses them as provided without additional checks.
 
@@ -436,19 +449,33 @@ Make the HTTP request using:
 - Headers: resolved headers from Step 2
 - Body: `requestBody` from user configuration
 
-**Step 4 — Handle errors with retries:**
+**Step 4 — Handle errors:**
 
-Retry count comes from `num_retries` in the snapshot.
+`num_retries` from the snapshot is ignored — retries are handled by n8n's built-in "Retry On Fail" setting. See note 7 in the open notes.
 
-If the API call failed:
-- If retries not exhausted:
-  1. Call `/logs` with error log (auto-generated idempotency key per attempt)
-  2. Check `/logs` response for `abort` flag — if true, call `/terminate` and halt
-  3. Retry the API call
-- If retries exhausted or `num_retries` is 0:
-  1. Call `/logs` with error log
-  2. Call `/terminate` with reason describing the error
-  3. Halt the workflow
+If the service API call failed:
+
+1. Call `/logs` with error log (auto-generated idempotency key)
+2. Check `/logs` response for `abort` flag — if `abort` is true, call `/terminate` with `external_execution_id`.
+3. Read node settings: `this.continueOnFail()`, `node.retryOnFail`
+
+**Path 1 — On Error: Stop Workflow (n8n built-in, recommended):**
+
+- If "Retry On Fail" is enabled:
+  - Do NOT call `/terminate` — let n8n retry.
+  - Throw `NodeOperationError`. n8n may repeat the entire node's execute() from scratch. This will include a new service API call (with potential additional cost) and new logs with a new idempotency key.
+  - The node cannot know if retries are exhausted. If n8n eventually gives up, the Circus background service detects the stale execution and marks it as failed.
+- If "Retry On Fail" is not enabled:
+  - Call `/terminate` with `external_execution_id` immediately — no retry is coming.
+  - Throw an error.
+
+**Path 2 — On Error: anything other than "Stop Workflow" (Continue variants):**
+
+The node detects this via `this.continueOnFail()`. Instead of letting n8n continue in a broken state:
+
+1. Call `/terminate` with `external_execution_id` to trigger remote termination. The platform calls n8n's `POST /api/v1/executions/{id}/stop` to kill the execution.
+2. Throw `NodeOperationError`.
+3. n8n catches the error and retries or continues — but the platform's remote stop kills the execution. The remote termination may arrive after n8n has already continued to the next node, but that is acceptable.
 
 **Step 5 — Success output:**
 
@@ -506,13 +533,11 @@ Not used for Agent nodes — Agent nodes handle their own logging internally.
 | `requestPayload` | json | No | — | Request data to store |
 | `responsePayload` | json | No | — | Response data to store |
 
+The  `external_execution_id` is automatically added to the request by the node.
+
 **Advanced/Settings tab:**
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `enableRetries` | boolean | No | false | Enable retries on /log endpoint failures |
-| `maxRetries` | number | No | 0 | Number of retry attempts |
-| `terminateOnError` | boolean | No | false | If true, terminate the workflow when /log call fails (after retries exhausted) |
+No custom retry or terminate configuration. Use n8n's built-in "Retry On Fail" setting for transient /log endpoint failures. 
 
 ### API Call
 
@@ -532,7 +557,8 @@ Not used for Agent nodes — Agent nodes handle their own logging internally.
   "output_size": 340,
   "error_message": "optional error description",
   "request_payload": {},
-  "response_payload": {}
+  "response_payload": {},
+  "external_execution_id": "{n8n's internal workflow execution id}"
 }
 ```
 
@@ -558,19 +584,31 @@ Response:
 ```
 
 If `abort` is `true`:
-1. Call `POST /api/machine/workflow-executions/:executionId/terminate` with reason: `"Execution aborted: cost or time threshold exceeded"`
-2. Halt the workflow
+1. Call `POST /api/machine/workflow-executions/:executionId/terminate` with `external_execution_id` and reason: `"Execution aborted: cost or time threshold exceeded"`
+2. Throw an error
 
 If `abort` is `false`: continue workflow execution.
 
-**On failure:**
+**On failure (the /log API call itself failed):**
 
-If retries enabled and not exhausted: retry with same idempotency key.
-If retries exhausted:
-- If `terminateOnError` is true:
-  1. Call `/terminate` with reason: `"Log endpoint failed after {maxRetries} retries"`
-  2. Halt the workflow
-- If `terminateOnError` is false: continue workflow execution (log failure is swallowed).
+1. Read node settings: `this.continueOnFail()`, `node.retryOnFail`
+
+**Path 1 — On Error: Stop Workflow (recommended):**
+
+- If "Retry On Fail" is enabled:
+  - Do NOT call `/terminate` — let n8n retry.
+  - Throw `NodeOperationError`. n8n may retry the node's execute() from scratch.
+  - The node cannot know if retries are exhausted. If n8n eventually gives up, the Circus background service detects the stale execution and marks it as failed.
+- If "Retry On Fail" is not enabled:
+  - Call `/terminate` with `external_execution_id` — no retry is coming.
+  - Throw `NodeOperationError`.
+
+
+**Path 2 — On Error: anything other than "Stop Workflow" (Continue variants):**
+
+- Call `/terminate` with `external_execution_id` to trigger remote termination. Regardless of retry setting — continuing after a failed log is dangerous because threshold checks won't work.
+- Throw `NodeOperationError`.
+- n8n catches the error and retries or continues — but the platform's remote stop kills the execution.
 
 ### Output
 
@@ -589,12 +627,13 @@ If retries exhausted:
 
 ### Purpose
 
-Terminates a workflow execution on the Circus platform due to an error. Used in error branches where the developer needs explicit termination control. Should not be used with nodes that self-terminate (Agent, Service, or Log with `terminateOnError` enabled).
+Terminates a workflow execution on the Circus platform due to an error. This node is intended to be the **last node** in the workflow in an error branch. Should not be used with nodes that self-terminate (Agent, Service, or Log).
 
 ### User Configuration (n8n UI)
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `workflowExecutionId` | string | Yes | — | The workflow execution ID from the webhook payload |
 | `reason` | string | No | — | Termination reason. Supports static text or dynamic n8n expressions. |
 
 ### API Call
@@ -605,19 +644,29 @@ Terminates a workflow execution on the Circus platform due to an error. Used in 
 
 ```json
 {
-  "reason": "{reason or empty string}"
+  "reason": "{reason or empty string}",
+  "external_execution_id": "{n8n's internal execution ID}"
 }
 ```
 
+The `external_execution_id` is obtained automatically from n8n's runtime context — not configured by the user.
+
 ### Runtime Behavior
 
-1. Make the API call to `/terminate`
-2. Do not check or act on the response status — fire and forget
-3. Halt the n8n workflow execution (throw NodeOperationError)
+1. Make the API call to `/terminate` with `external_execution_id`
+2. On success: return output data. 
+3. On failure:
+   - Attempt to record a log entry by calling `/logs`
+   - Throw `NodeOperationError`
 
 ### Output
 
-None — the workflow is terminated.
+```json
+{
+  "terminated": true,
+  "reason": "{reason}"
+}
+```
 
 ---
 
@@ -625,7 +674,7 @@ None — the workflow is terminated.
 
 ### Purpose
 
-Marks a workflow execution as successfully completed on the Circus platform and transmits the result artifacts.
+Marks a workflow execution as successfully completed on the Circus platform and transmits the result artifacts. This node is intended to be used as the last node in the success branch of the workflow and to transmit ALL resulting artifacts back to the platform. Executing this node will mark the execution as completed in the Circus platform, but it will not automatically stop the workflow execution.
 
 ### User Configuration (n8n UI)
 
@@ -637,10 +686,7 @@ Marks a workflow execution as successfully completed on the Circus platform and 
 
 **Advanced/Settings tab:**
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `enableRetries` | boolean | No | false | Enable retries on /complete endpoint failures |
-| `maxRetries` | number | No | 0 | Number of retry attempts |
+No custom retry configuration. Use n8n's built-in "Retry On Fail" setting for transient /complete endpoint failures. 
 
 ### API Call
 
@@ -650,7 +696,8 @@ Marks a workflow execution as successfully completed on the Circus platform and 
 
 ```json
 {
-  "result_payload": { ... }
+  "result_payload": { ... },
+  "external_execution_id": "{n8n's internal execution ID}"
 }
 ```
 
@@ -683,9 +730,9 @@ Response:
 
 The n8n workflow ends gracefully. No additional `/log` or `/terminate` calls.
 
-**On failure (after retries exhausted):**
+**On failure (the /complete API call failed):**
 
-1. Call `/logs` with error log:
+1. Call `/logs` with error log (best-effort, do not fail if this also fails):
 ```json
 {
   "idempotency_key": "{auto-generated UUID}",
@@ -693,11 +740,28 @@ The n8n workflow ends gracefully. No additional `/log` or `/terminate` calls.
   "worker_type": "internal",
   "worker_slug": "system",
   "status": "error",
-  "error_message": "Complete endpoint failed after {maxRetries} retries: {error details}"
+  "error_message": "Complete endpoint failed: {error details}",
+  "external_execution_id": "{n8n's internal execution ID}"
 }
 ```
-2. Call `/terminate` with reason: `"Failed to complete execution: {error details}"`
-3. Halt the workflow (failure state)
+
+2. Read node settings: `this.continueOnFail()`, `node.retryOnFail`
+
+**Path 1 — On Error: Stop Workflow (recommended):**
+
+- If "Retry On Fail" is enabled:
+  - Do NOT call `/terminate` — let n8n retry. The /complete call may succeed on retry.
+  - Throw `NodeOperationError`.
+  - The node cannot know if retries are exhausted. If n8n eventually gives up, the Circus background service detects the stale execution and marks it as failed.
+- If "Retry On Fail" is not enabled:
+  - Call `/terminate` with `external_execution_id` and reason: `"Failed to complete execution: {error details}"` — no retry is coming.
+  - Throw an error.
+
+**Path 2 — On Error: anything other than "Stop Workflow" (Continue variants):**
+
+- Call `/terminate` with `external_execution_id` and reason: `"Failed to complete execution: {error details}"`. Regardless of retry setting — continuing after a failed /complete means the execution stays in "running" state indefinitely.
+- Throw `NodeOperationError`.
+- n8n catches the error and retries or continues — but the platform's remote stop kills the execution.
 
 ### Output
 
@@ -705,71 +769,6 @@ The n8n workflow ends gracefully. No additional `/log` or `/terminate` calls.
 {
   "completed": true,
   "message": "Execution completed successfully"
-}
-```
-
----
-
-## 6. Set Remote Execution ID Node
-
-### Purpose
-
-Registers n8n's internal execution ID with the Circus platform, enabling future remote termination of the workflow. Optional but recommended as the first node after the webhook trigger.
-
-### User Configuration (n8n UI)
-
-**Advanced/Settings tab:**
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `enableRetries` | boolean | No | false | Enable retries on failures |
-| `maxRetries` | number | No | 0 | Number of retry attempts |
-
-No main tab fields — the node automatically extracts n8n's execution ID from the runtime context.
-
-### API Call
-
-**NOTE: This endpoint does not exist yet and will be developed as part of this work.**
-
-`PATCH /api/machine/workflow-executions/:executionId/remote-execution-id`
-
-**Request body:**
-
-```json
-{
-  "external_execution_id": "{n8n's internal execution ID}"
-}
-```
-
-The `executionId` in the URL path is the Circus workflow execution ID from the webhook payload.
-The `external_execution_id` in the body is n8n's internal execution ID, obtained from n8n's runtime context.
-
-### Response Handling
-
-**On failure (after retries exhausted):**
-
-Call `/logs` with error log:
-```json
-{
-  "idempotency_key": "{auto-generated UUID}",
-  "node_name": "circus-set-remote-execution-id",
-  "worker_type": "internal",
-  "worker_slug": "system",
-  "status": "error",
-  "error_message": "Failed to set remote execution ID: {error details}"
-}
-```
-
-Do NOT halt the workflow — continue execution.
-
-**On success:** Continue execution.
-
-### Output
-
-```json
-{
-  "set": true,
-  "external_execution_id": "{n8n's execution ID}"
 }
 ```
 
@@ -784,15 +783,18 @@ When any node needs to log an error to the Circus platform (before terminating o
 ```json
 {
   "idempotency_key": "{auto-generated UUID}",
+  "external_execution_id": "{n8n's internal execution ID}",
   "node_name": "{node's user-defined name or component identifier}",
   "worker_type": "internal",
   "worker_slug": "system",
   "status": "error",
   "error_message": "{descriptive error message}",
   "request_payload": null,
-  "response_payload": null
+  "response_payload": null,
 }
 ```
+
+The `external_execution_id` is included in every API call (see note 6). If the platform hasn't stored it yet, it patches the database on first encounter.
 
 For Agent and Service nodes logging their own API call results, `worker_type` and `worker_slug` match the agent/service being executed, not `internal`/`system`.
 
@@ -806,11 +808,18 @@ When any node needs to terminate the remote execution:
 
 ```json
 {
-  "reason": "{descriptive reason}"
+  "reason": "{descriptive reason}",
+  "external_execution_id": "{n8n's internal execution ID}"
 }
 ```
 
-After calling terminate, the node halts the n8n workflow by throwing a `NodeOperationError`.
+The `external_execution_id` is obtained from n8n's runtime context. The platform uses it to call n8n's `POST /api/v1/executions/{id}/stop` to kill the workflow remotely.
+
+After calling terminate, the node's behavior depends on the failure type and settings:
+- **Permanent failure (missing config, validation, threshold breach):** call `/terminate`, throw an error. The platform's remote stop kills the execution.
+- **Transient failure + Stop Workflow + retries on:** do NOT call `/terminate`. Throw to let n8n retry. The node cannot know if retries are exhausted.
+- **Transient failure + Stop Workflow + retries off:** call `/terminate`, throw an error. No retry is coming.
+- **Transient failure + Continue (any variant):** call `/terminate`, throw. The platform kills the execution remotely.
 
 ---
 
