@@ -4,8 +4,9 @@ import type {
 	INodeExecutionData,
 	INodeType,
 	INodeTypeDescription,
+	JsonObject,
 } from 'n8n-workflow';
-import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 
 interface ServiceAssignment {
 	service_slug: string;
@@ -301,10 +302,10 @@ export class CircusService implements INodeType {
 
 					if (!continueOnFail && retryOnFail) {
 						// Path 1 + retries: do NOT terminate, let n8n retry
-						throw new NodeOperationError(
+						throw new NodeApiError(
 							this.getNode(),
-							serviceError.message,
-							{ itemIndex: i },
+							serviceError as unknown as JsonObject,
+							{ message: serviceError.message, itemIndex: i },
 						);
 					}
 
@@ -328,10 +329,10 @@ export class CircusService implements INodeType {
 						// Best-effort
 					}
 
-					throw new NodeOperationError(
+					throw new NodeApiError(
 						this.getNode(),
-						`Service call failed: ${serviceError.message}`,
-						{ itemIndex: i },
+						serviceError as unknown as JsonObject,
+						{ message: `Service call failed: ${serviceError.message}`, itemIndex: i },
 					);
 				}
 
@@ -355,7 +356,7 @@ export class CircusService implements INodeType {
 					pairedItem: { item: i },
 				});
 			} catch (error) {
-				if (error instanceof NodeOperationError) {
+				if (error instanceof NodeOperationError || error instanceof NodeApiError) {
 					// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 					throw error;
 				}
