@@ -4,8 +4,9 @@ import type {
 	INodeExecutionData,
 	INodeType,
 	INodeTypeDescription,
+	JsonObject,
 } from 'n8n-workflow';
-import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 
 export class CircusLog implements INodeType {
 	description: INodeTypeDescription = {
@@ -233,10 +234,10 @@ export class CircusLog implements INodeType {
 
 					if (!continueOnFail && retryOnFail) {
 						// Path 1 + retries: do NOT terminate, let n8n retry
-						throw new NodeOperationError(
+						throw new NodeApiError(
 							this.getNode(),
-							(logError as Error).message,
-							{ itemIndex: i },
+							logError as unknown as JsonObject,
+							{ message: (logError as Error).message, itemIndex: i },
 						);
 					}
 
@@ -259,10 +260,10 @@ export class CircusLog implements INodeType {
 					} catch {
 						// Fire and forget
 					}
-					throw new NodeOperationError(
+					throw new NodeApiError(
 						this.getNode(),
-						`Log endpoint failed: ${(logError as Error).message}`,
-						{ itemIndex: i },
+						logError as unknown as JsonObject,
+						{ message: `Log endpoint failed: ${(logError as Error).message}`, itemIndex: i },
 					);
 				}
 
@@ -302,7 +303,7 @@ export class CircusLog implements INodeType {
 					pairedItem: { item: i },
 				});
 			} catch (error) {
-				if (error instanceof NodeOperationError) {
+				if (error instanceof NodeApiError || error instanceof NodeOperationError) {
 					// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 					throw error;
 				}

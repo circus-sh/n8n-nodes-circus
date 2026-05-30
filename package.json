@@ -36,6 +36,7 @@
         "nodes": [
             "dist/nodes/CircusComplete/CircusComplete.node.js",
             "dist/nodes/CircusLog/CircusLog.node.js",
+            "dist/nodes/CircusService/CircusService.node.js",
             "dist/nodes/CircusTerminate/CircusTerminate.node.js"
         ]
     },

@@ -4,8 +4,9 @@ import type {
 	INodeExecutionData,
 	INodeType,
 	INodeTypeDescription,
+	JsonObject,
 } from 'n8n-workflow';
-import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 
 export class CircusTerminate implements INodeType {
 	description: INodeTypeDescription = {
@@ -94,10 +95,10 @@ export class CircusTerminate implements INodeType {
 					} catch {
 						// Best-effort — do not fail
 					}
-					throw new NodeOperationError(
+					throw new NodeApiError(
 						this.getNode(),
-						`Terminate endpoint failed: ${(error as Error).message}`,
-						{ itemIndex: i },
+						error as unknown as JsonObject,
+						{ message: `Terminate endpoint failed: ${(error as Error).message}`, itemIndex: i },
 					);
 				}
 
@@ -109,7 +110,7 @@ export class CircusTerminate implements INodeType {
 					pairedItem: { item: i },
 				});
 			} catch (error) {
-				if (error instanceof NodeOperationError) {
+				if (error instanceof NodeApiError || error instanceof NodeOperationError) {
 					// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 					throw error;
 				}
