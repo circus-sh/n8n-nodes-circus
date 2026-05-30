@@ -50,7 +50,7 @@ export class CircusApi implements ICredentialType {
 		request: {
 			baseURL: '={{$credentials.apiUrl}}',
 			url: '/api/machine/health',
-			method: 'GET',
+			method: 'POST',
 		},
 	};
 }

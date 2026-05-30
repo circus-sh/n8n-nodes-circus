@@ -21,7 +21,6 @@ Credential test endpoint: `POST /api/machine/health`
 | CircusLog | Log workflow steps, check cost/time thresholds | Low |
 | CircusTerminate | Terminate a workflow execution on error | Low |
 | CircusComplete | Mark execution as complete with result payload | Low |
-| CircusSetRemoteExecutionId | Register n8n execution ID with the platform | Low |
 
 ## Build order
 
@@ -29,11 +28,10 @@ Implement nodes in this order (simplest to most complex). Each node should be wo
 
 1. CircusApi credentials
 2. CircusTerminate
-3. CircusSetRemoteExecutionId
-4. CircusLog
-5. CircusComplete
-6. CircusService
-7. CircusAgent
+3. CircusLog
+4. CircusComplete
+5. CircusService
+6. CircusAgent
 
 ## AI Provider Credentials
 

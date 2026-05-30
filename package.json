@@ -34,6 +34,7 @@
             "dist/credentials/CircusApi.credentials.js"
         ],
         "nodes": [
+            "dist/nodes/CircusComplete/CircusComplete.node.js",
             "dist/nodes/CircusLog/CircusLog.node.js",
             "dist/nodes/CircusTerminate/CircusTerminate.node.js"
         ]
