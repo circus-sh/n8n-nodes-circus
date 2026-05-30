@@ -4,8 +4,9 @@ import type {
 	INodeExecutionData,
 	INodeType,
 	INodeTypeDescription,
+	JsonObject,
 } from 'n8n-workflow';
-import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 
 export class CircusComplete implements INodeType {
 	description: INodeTypeDescription = {
@@ -117,10 +118,10 @@ export class CircusComplete implements INodeType {
 
 					if (!continueOnFail && retryOnFail) {
 						// Path 1 + retries: do NOT terminate, let n8n retry
-						throw new NodeOperationError(
+						throw new NodeApiError(
 							this.getNode(),
-							`Failed to complete execution: ${errorDetails}`,
-							{ itemIndex: i },
+							completeError as unknown as JsonObject,
+							{ message: `Failed to complete execution: ${errorDetails}`, itemIndex: i },
 						);
 					}
 
@@ -144,10 +145,10 @@ export class CircusComplete implements INodeType {
 						// Best-effort — do not fail
 					}
 
-					throw new NodeOperationError(
+					throw new NodeApiError(
 						this.getNode(),
-						`Failed to complete execution: ${errorDetails}`,
-						{ itemIndex: i },
+						completeError as unknown as JsonObject,
+						{ message: `Failed to complete execution: ${errorDetails}`, itemIndex: i },
 					);
 				}
 
@@ -159,7 +160,7 @@ export class CircusComplete implements INodeType {
 					pairedItem: { item: i },
 				});
 			} catch (error) {
-				if (error instanceof NodeOperationError) {
+				if (error instanceof NodeApiError || error instanceof NodeOperationError) {
 					// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 					throw error;
 				}
