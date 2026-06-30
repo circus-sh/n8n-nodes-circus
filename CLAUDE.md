@@ -4,7 +4,7 @@
 
 This repository contains custom n8n nodes for the Circus AI Workflow Orchestration Platform (https://circus.sh). These nodes enable n8n workflow developers to integrate with the Circus platform's workflow execution engine — logging execution steps, tracking costs, managing execution lifecycle, and executing AI agent calls using operator-configured models and prompts.
 
-Read `docs/n8n_nodes_spec.md` for the detailed specification of all six Circus nodes, including exact API endpoints, field mappings, request/response structures, and runtime behavior.
+Read `docs/n8n_nodes_spec.md` for the detailed specification of all Circus nodes, including exact API endpoints, field mappings, request/response structures, and runtime behavior.
 
 ## Circus Platform API
 
@@ -16,22 +16,11 @@ Credential test endpoint: `POST /api/machine/health`
 
 | Node | Purpose | Complexity |
 |------|---------|------------|
+| CircusInit | Store webhook payload in execution data for downstream nodes | Low |
 | CircusAgent | Operator-controlled AI execution — reads model, prompt, and parameters from snapshot | High |
-| CircusService | External service calls using snapshot-configured URL, headers, method | Medium |
 | CircusLog | Log workflow steps, check cost/time thresholds | Low |
 | CircusTerminate | Terminate a workflow execution on error | Low |
 | CircusComplete | Mark execution as complete with result payload | Low |
-
-## Build order
-
-Implement nodes in this order (simplest to most complex). Each node should be working and passing lint/build before starting the next:
-
-1. CircusApi credentials
-2. CircusTerminate
-3. CircusLog
-4. CircusComplete
-5. CircusService
-6. CircusAgent
 
 ## AI Provider Credentials
 
@@ -39,8 +28,9 @@ The Agent node requires AI provider API keys stored as n8n credentials following
 
 ## Key Design Decisions
 
-- All nodes extract `workflow_execution_id` from the webhook payload that triggered the n8n workflow
-- The Agent and Service nodes read their configuration from snapshots in the webhook payload — they do not hardcode API URLs, models, or prompts
+- The Circus Init node stores the webhook payload in n8n's execution custom data; all downstream nodes read context via the shared `getCircusContext()` and `getSnapshot()` helpers in `nodes/shared/circusContext.ts`
+- All nodes extract `workflow_execution_id` from execution custom data (stored by the Init node)
+- The Agent node reads its configuration from snapshots in the webhook payload — it does not hardcode API URLs, models, or prompts
 - The Agent node builds provider-specific HTTP requests (OpenAI, Anthropic, Google, xAI). Unknown providers fall back to OpenAI request structure.
 - The Log node only supports `worker_type` of `service` or `internal` — not `agent` (Agent nodes self-log)
 - Idempotency keys are auto-generated via `crypto.randomUUID()` per log entry, never exposed to the user

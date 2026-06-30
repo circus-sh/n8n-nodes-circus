@@ -7,6 +7,7 @@ import type {
 	JsonObject,
 } from 'n8n-workflow';
 import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+import { getCircusContext } from '../shared/circusContext';
 
 export class CircusTerminate implements INodeType {
 	description: INodeTypeDescription = {
@@ -31,14 +32,6 @@ export class CircusTerminate implements INodeType {
 		],
 		properties: [
 			{
-				displayName: 'Workflow Execution ID',
-				name: 'workflowExecutionId',
-				type: 'string',
-				required: true,
-				default: '={{ $json.body.workflow_execution_id }}',
-				description: 'The workflow execution ID from the webhook payload',
-			},
-			{
 				displayName: 'Termination Reason',
 				name: 'reason',
 				type: 'string',
@@ -55,19 +48,14 @@ export class CircusTerminate implements INodeType {
 
 		for (let i = 0; i < items.length; i++) {
 			try {
-				const workflowExecutionId = this.getNodeParameter(
-					'workflowExecutionId',
-					i,
-				) as string;
 				const reason = this.getNodeParameter('reason', i, '') as string;
-				const externalExecutionId = this.getExecutionId();
+				const circus = await getCircusContext(this);
 
 				try {
 					await this.helpers.httpRequestWithAuthentication.call(this, 'circusApi', {
 						method: 'POST',
-						baseURL: '={{$credentials.apiUrl}}',
-						url: `/api/machine/workflow-executions/${workflowExecutionId}/terminate`,
-						body: { reason, external_execution_id: externalExecutionId },
+						url: `${circus.baseUrl}/terminate`,
+						body: { reason, external_execution_id: circus.externalExecutionId },
 						json: true,
 					});
 				} catch (error) {
@@ -78,11 +66,10 @@ export class CircusTerminate implements INodeType {
 							'circusApi',
 							{
 								method: 'POST',
-								baseURL: '={{$credentials.apiUrl}}',
-								url: `/api/machine/workflow-executions/${workflowExecutionId}/logs`,
+								url: `${circus.baseUrl}/logs`,
 								body: {
 									idempotency_key: randomUUID(),
-									external_execution_id: externalExecutionId,
+									external_execution_id: circus.externalExecutionId,
 									node_name: 'circus-terminate',
 									worker_type: 'internal',
 									worker_slug: 'system',

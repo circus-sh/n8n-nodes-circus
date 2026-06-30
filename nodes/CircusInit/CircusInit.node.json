@@ -1,5 +1,5 @@
 {
-	"node": "n8n-nodes-circus.circusService",
+	"node": "n8n-nodes-circus.circusInit",
 	"nodeVersion": "1.0",
 	"codexVersion": "1.0",
 	"categories": ["Development", "Developer Tools"],
@@ -11,7 +11,7 @@
 		],
 		"primaryDocumentation": [
 			{
-				"url": "https://circus.sh/docs/n8n-nodes#service"
+				"url": "https://circus.sh/docs/n8n-nodes#init"
 			}
 		]
 	}

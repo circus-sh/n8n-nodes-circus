@@ -7,6 +7,7 @@ import type {
 	JsonObject,
 } from 'n8n-workflow';
 import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+import { getCircusContext } from '../shared/circusContext';
 
 export class CircusLog implements INodeType {
 	description: INodeTypeDescription = {
@@ -30,14 +31,6 @@ export class CircusLog implements INodeType {
 			},
 		],
 		properties: [
-			{
-				displayName: 'Workflow Execution ID',
-				name: 'workflowExecutionId',
-				type: 'string',
-				required: true,
-				default: '={{ $json.body.workflow_execution_id }}',
-				description: 'The workflow execution ID from the webhook payload',
-			},
 			{
 				displayName: 'Node Name',
 				name: 'nodeName',
@@ -137,10 +130,6 @@ export class CircusLog implements INodeType {
 
 		for (let i = 0; i < items.length; i++) {
 			try {
-				const workflowExecutionId = this.getNodeParameter(
-					'workflowExecutionId',
-					i,
-				) as string;
 				const nodeName = this.getNodeParameter('nodeName', i) as string;
 				const workerType = this.getNodeParameter('workerType', i) as string;
 				const workerSlug = this.getNodeParameter('workerSlug', i) as string;
@@ -150,8 +139,8 @@ export class CircusLog implements INodeType {
 					i,
 					0,
 				) as number;
-				const inputSize = this.getNodeParameter('inputSize', i, 0) as number;
-				const outputSize = this.getNodeParameter('outputSize', i, 0) as number;
+				const inputSize = Number(this.getNodeParameter('inputSize', i, 0)) || 0;
+				const outputSize = Number(this.getNodeParameter('outputSize', i, 0)) || 0;
 				const errorMessage =
 					status === 'error'
 						? (this.getNodeParameter('errorMessage', i, '') as string)
@@ -174,7 +163,7 @@ export class CircusLog implements INodeType {
 					? (JSON.parse(responsePayloadRaw) as object)
 					: undefined;
 
-				const externalExecutionId = this.getExecutionId();
+				const circus = await getCircusContext(this);
 
 				// A new idempotency key is generated per execute() call. If n8n's built-in
 				// "Retry On Fail" re-runs this node, a new key will be generated because
@@ -192,7 +181,7 @@ export class CircusLog implements INodeType {
 					worker_type: workerType,
 					worker_slug: workerSlug,
 					status,
-					external_execution_id: externalExecutionId,
+					external_execution_id: circus.externalExecutionId,
 				};
 
 				if (durationSeconds) body.duration_seconds = durationSeconds;
@@ -214,8 +203,7 @@ export class CircusLog implements INodeType {
 						'circusApi',
 						{
 							method: 'POST',
-							baseURL: '={{$credentials.apiUrl}}',
-							url: `/api/machine/workflow-executions/${workflowExecutionId}/logs`,
+							url: `${circus.baseUrl}/logs`,
 							body,
 							json: true,
 						},
@@ -228,6 +216,7 @@ export class CircusLog implements INodeType {
 					};
 					responseData = response.data;
 				} catch (logError) {
+
 					// The /log API call itself failed
 					const continueOnFail = this.continueOnFail();
 					const retryOnFail = this.getNode().retryOnFail;
@@ -237,7 +226,7 @@ export class CircusLog implements INodeType {
 						throw new NodeApiError(
 							this.getNode(),
 							logError as unknown as JsonObject,
-							{ message: (logError as Error).message, itemIndex: i },
+							{ message: `${(logError as Error).message}`, itemIndex: i },
 						);
 					}
 
@@ -248,11 +237,10 @@ export class CircusLog implements INodeType {
 							'circusApi',
 							{
 								method: 'POST',
-								baseURL: '={{$credentials.apiUrl}}',
-								url: `/api/machine/workflow-executions/${workflowExecutionId}/terminate`,
+								url: `${circus.baseUrl}/terminate`,
 								body: {
 									reason: `Log endpoint failed: ${(logError as Error).message}`,
-									external_execution_id: externalExecutionId,
+									external_execution_id: circus.externalExecutionId,
 								},
 								json: true,
 							},
@@ -276,11 +264,10 @@ export class CircusLog implements INodeType {
 							'circusApi',
 							{
 								method: 'POST',
-								baseURL: '={{$credentials.apiUrl}}',
-								url: `/api/machine/workflow-executions/${workflowExecutionId}/terminate`,
+								url: `${circus.baseUrl}/terminate`,
 								body: {
 									reason,
-									external_execution_id: externalExecutionId,
+									external_execution_id: circus.externalExecutionId,
 								},
 								json: true,
 							},

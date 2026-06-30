@@ -31,13 +31,17 @@
         "n8nNodesApiVersion": 1,
         "strict": true,
         "credentials": [
-            "dist/credentials/CircusApi.credentials.js"
+            "dist/credentials/CircusApi.credentials.js",
+            "dist/credentials/CircusAnthropicApi.credentials.js",
+            "dist/credentials/CircusGoogleApi.credentials.js",
+            "dist/credentials/CircusOpenaiApi.credentials.js",
+            "dist/credentials/CircusXaiApi.credentials.js"
         ],
         "nodes": [
             "dist/nodes/CircusAgent/CircusAgent.node.js",
             "dist/nodes/CircusComplete/CircusComplete.node.js",
+            "dist/nodes/CircusInit/CircusInit.node.js",
             "dist/nodes/CircusLog/CircusLog.node.js",
-            "dist/nodes/CircusService/CircusService.node.js",
             "dist/nodes/CircusTerminate/CircusTerminate.node.js"
         ]
     },

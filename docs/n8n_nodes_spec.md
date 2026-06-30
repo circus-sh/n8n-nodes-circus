@@ -335,24 +335,24 @@ If `abort` is `true`:
 
 **Step 8 — Handle errors:**
 
-If the AI API call returned an error, the error is already logged in Step 7. The node then throws `NodeOperationError`.
+If the AI API call returned an error, the error is already logged in Step 7. The node then throws `NodeApiError` (API failure, not a configuration error).
 
 **Path 1 — On Error: Stop Workflow (n8n built-in, recommended):**
 
 - If "Retry On Fail" is enabled:
   - Do NOT call `/terminate` — let n8n retry.
-  - Throw `NodeOperationError`. n8n may repeat the entire node's execute() from scratch. This will include new validation, a new AI API call (with additional cost), and new logs via Step 7 with a new idempotency key.
+  - Throw `NodeApiError`. n8n may repeat the entire node's execute() from scratch. This will include new validation, a new AI API call (with additional cost), and new logs via Step 7 with a new idempotency key.
   - The node cannot know if retries are exhausted. If n8n eventually gives up, the Circus background service detects the stale execution and marks it as failed.
 - If "Retry On Fail" is not enabled:
   - Call `/terminate` with `external_execution_id` immediately — no retry is coming.
-  - Throw `NodeOperationError`.
+  - Throw `NodeApiError`.
 
 **Path 2 — On Error: anything other than "Stop Workflow" (Continue variants):**
 
 The node detects this via `this.continueOnFail()`. Instead of letting n8n continue in a broken state:
 
 1. Call `/terminate` with `external_execution_id` to trigger remote termination. The platform calls n8n's `POST /api/v1/executions/{id}/stop` to kill the execution.
-2. Throw `NodeOperationError`.
+2. Throw `NodeApiError`.
 3. n8n catches the error and retries or continues — but the platform's remote stop kills the execution. The remote termination may arrive after n8n has already continued to the next node, but that is acceptable.
 
 **Step 9 — Success output:**
@@ -464,18 +464,18 @@ If the service API call failed:
 
 - If "Retry On Fail" is enabled:
   - Do NOT call `/terminate` — let n8n retry.
-  - Throw `NodeOperationError`. n8n may repeat the entire node's execute() from scratch. This will include a new service API call (with potential additional cost) and new logs with a new idempotency key.
+  - Throw `NodeApiError`. n8n may repeat the entire node's execute() from scratch. This will include a new service API call (with potential additional cost) and new logs with a new idempotency key.
   - The node cannot know if retries are exhausted. If n8n eventually gives up, the Circus background service detects the stale execution and marks it as failed.
 - If "Retry On Fail" is not enabled:
   - Call `/terminate` with `external_execution_id` immediately — no retry is coming.
-  - Throw an error.
+  - Throw `NodeApiError`.
 
 **Path 2 — On Error: anything other than "Stop Workflow" (Continue variants):**
 
 The node detects this via `this.continueOnFail()`. Instead of letting n8n continue in a broken state:
 
 1. Call `/terminate` with `external_execution_id` to trigger remote termination. The platform calls n8n's `POST /api/v1/executions/{id}/stop` to kill the execution.
-2. Throw `NodeOperationError`.
+2. Throw `NodeApiError`.
 3. n8n catches the error and retries or continues — but the platform's remote stop kills the execution. The remote termination may arrive after n8n has already continued to the next node, but that is acceptable.
 
 **Step 5 — Success output:**
@@ -598,17 +598,17 @@ If `abort` is `false`: continue workflow execution.
 
 - If "Retry On Fail" is enabled:
   - Do NOT call `/terminate` — let n8n retry.
-  - Throw `NodeOperationError`. n8n may retry the node's execute() from scratch.
+  - Throw `NodeApiError`. n8n may retry the node's execute() from scratch.
   - The node cannot know if retries are exhausted. If n8n eventually gives up, the Circus background service detects the stale execution and marks it as failed.
 - If "Retry On Fail" is not enabled:
   - Call `/terminate` with `external_execution_id` — no retry is coming.
-  - Throw `NodeOperationError`.
+  - Throw `NodeApiError`.
 
 
 **Path 2 — On Error: anything other than "Stop Workflow" (Continue variants):**
 
 - Call `/terminate` with `external_execution_id` to trigger remote termination. Regardless of retry setting — continuing after a failed log is dangerous because threshold checks won't work.
-- Throw `NodeOperationError`.
+- Throw `NodeApiError`.
 - n8n catches the error and retries or continues — but the platform's remote stop kills the execution.
 
 ### Output
@@ -658,7 +658,7 @@ The `external_execution_id` is obtained automatically from n8n's runtime context
 2. On success: return output data. 
 3. On failure:
    - Attempt to record a log entry by calling `/logs`
-   - Throw `NodeOperationError`
+   - Throw `NodeApiError`
 
 ### Output
 
@@ -752,16 +752,16 @@ The n8n workflow ends gracefully. No additional `/log` or `/terminate` calls.
 
 - If "Retry On Fail" is enabled:
   - Do NOT call `/terminate` — let n8n retry. The /complete call may succeed on retry.
-  - Throw `NodeOperationError`.
+  - Throw `NodeApiError`.
   - The node cannot know if retries are exhausted. If n8n eventually gives up, the Circus background service detects the stale execution and marks it as failed.
 - If "Retry On Fail" is not enabled:
   - Call `/terminate` with `external_execution_id` and reason: `"Failed to complete execution: {error details}"` — no retry is coming.
-  - Throw an error.
+  - Throw `NodeApiError`.
 
 **Path 2 — On Error: anything other than "Stop Workflow" (Continue variants):**
 
 - Call `/terminate` with `external_execution_id` and reason: `"Failed to complete execution: {error details}"`. Regardless of retry setting — continuing after a failed /complete means the execution stays in "running" state indefinitely.
-- Throw `NodeOperationError`.
+- Throw `NodeApiError`.
 - n8n catches the error and retries or continues — but the platform's remote stop kills the execution.
 
 ### Output
@@ -772,6 +772,14 @@ The n8n workflow ends gracefully. No additional `/log` or `/terminate` calls.
   "message": "Execution completed successfully"
 }
 ```
+
+---
+
+## Shared: Error Type Convention
+
+All nodes use two error types from the `n8n-workflow` package:
+- **`NodeApiError`** — for API call failures (AI provider calls, Circus platform `/logs`, `/terminate`, `/complete` endpoint failures). These are transient errors that may succeed on retry.
+- **`NodeOperationError`** — for configuration/validation errors (missing agent slug, invalid parameters, threshold breaches). These are permanent errors that will fail identically on retry.
 
 ---
 
