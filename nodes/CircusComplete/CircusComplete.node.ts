@@ -7,6 +7,7 @@ import type {
 	JsonObject,
 } from 'n8n-workflow';
 import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+import { getCircusContext } from '../shared/circusContext';
 
 export class CircusComplete implements INodeType {
 	description: INodeTypeDescription = {
@@ -32,14 +33,6 @@ export class CircusComplete implements INodeType {
 		],
 		properties: [
 			{
-				displayName: 'Workflow Execution ID',
-				name: 'workflowExecutionId',
-				type: 'string',
-				required: true,
-				default: '={{ $json.body.workflow_execution_id }}',
-				description: 'The workflow execution ID from the webhook payload',
-			},
-			{
 				displayName: 'Result Payload',
 				name: 'resultPayload',
 				type: 'json',
@@ -57,18 +50,12 @@ export class CircusComplete implements INodeType {
 
 		for (let i = 0; i < items.length; i++) {
 			try {
-				const workflowExecutionId = this.getNodeParameter(
-					'workflowExecutionId',
-					i,
-				) as string;
 				const resultPayloadRaw = this.getNodeParameter(
 					'resultPayload',
 					i,
 				) as string;
 				const resultPayload = JSON.parse(resultPayloadRaw) as object;
-				const externalExecutionId = this.getExecutionId();
-
-				const baseUrl = `/api/machine/workflow-executions/${workflowExecutionId}`;
+				const circus = await getCircusContext(this);
 
 				try {
 					await this.helpers.httpRequestWithAuthentication.call(
@@ -76,11 +63,10 @@ export class CircusComplete implements INodeType {
 						'circusApi',
 						{
 							method: 'POST',
-							baseURL: '={{$credentials.apiUrl}}',
-							url: `${baseUrl}/complete`,
+							url: `${circus.baseUrl}/complete`,
 							body: {
 								result_payload: resultPayload,
-								external_execution_id: externalExecutionId,
+								external_execution_id: circus.externalExecutionId,
 							},
 							json: true,
 						},
@@ -95,8 +81,7 @@ export class CircusComplete implements INodeType {
 							'circusApi',
 							{
 								method: 'POST',
-								baseURL: '={{$credentials.apiUrl}}',
-								url: `${baseUrl}/logs`,
+								url: `${circus.baseUrl}/logs`,
 								body: {
 									idempotency_key: randomUUID(),
 									node_name: 'circus-complete',
@@ -104,7 +89,7 @@ export class CircusComplete implements INodeType {
 									worker_slug: 'system',
 									status: 'error',
 									error_message: `Complete endpoint failed: ${errorDetails}`,
-									external_execution_id: externalExecutionId,
+									external_execution_id: circus.externalExecutionId,
 								},
 								json: true,
 							},
@@ -132,11 +117,10 @@ export class CircusComplete implements INodeType {
 							'circusApi',
 							{
 								method: 'POST',
-								baseURL: '={{$credentials.apiUrl}}',
-								url: `${baseUrl}/terminate`,
+								url: `${circus.baseUrl}/terminate`,
 								body: {
 									reason: `Failed to complete execution: ${errorDetails}`,
-									external_execution_id: externalExecutionId,
+									external_execution_id: circus.externalExecutionId,
 								},
 								json: true,
 							},

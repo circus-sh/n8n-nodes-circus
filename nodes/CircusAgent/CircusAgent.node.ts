@@ -8,6 +8,7 @@ import type {
 	JsonObject,
 } from 'n8n-workflow';
 import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+import { getCircusContext, getSnapshot } from '../shared/circusContext';
 
 interface AgentAssignment {
 	agent_id: number;
@@ -69,9 +70,13 @@ function buildProviderRequest(
 			body = {
 				model: modelName,
 				messages: userMessages,
-				temperature,
 				max_tokens: maxTokens,
 			};
+			// TODO: Remove this workaround once the platform excludes temperature
+			// for models that don't support it
+			if (modelName !== 'claude-opus-4-8') {
+				body.temperature = temperature;
+			}
 			if (systemContext) {
 				body.system = systemContext;
 			}
@@ -184,17 +189,26 @@ export class CircusAgent implements INodeType {
 			{
 				name: 'circusApi',
 				required: true,
+				displayName: 'Circus Platform API',
+			},
+			{
+				name: 'circusOpenaiApi',
+				displayName: 'OpenAI API Key',
+			},
+			{
+				name: 'circusAnthropicApi',
+				displayName: 'Anthropic API Key',
+			},
+			{
+				name: 'circusGoogleApi',
+				displayName: 'Google AI API Key',
+			},
+			{
+				name: 'circusXaiApi',
+				displayName: 'xAI API Key',
 			},
 		],
 		properties: [
-			{
-				displayName: 'Workflow Execution ID',
-				name: 'workflowExecutionId',
-				type: 'string',
-				required: true,
-				default: '={{ $json.body.workflow_execution_id }}',
-				description: 'The workflow execution ID from the webhook payload',
-			},
 			{
 				displayName: 'Agent Slug',
 				name: 'agentSlug',
@@ -273,10 +287,6 @@ export class CircusAgent implements INodeType {
 				// Step 0 — Start duration timer
 				const startTime = Date.now();
 
-				const workflowExecutionId = this.getNodeParameter(
-					'workflowExecutionId',
-					i,
-				) as string;
 				const agentSlug = this.getNodeParameter('agentSlug', i) as string;
 				const inputText = this.getNodeParameter('inputText', i, '') as string;
 				const includeSystemContext = this.getNodeParameter(
@@ -285,9 +295,8 @@ export class CircusAgent implements INodeType {
 					false,
 				) as boolean;
 
-				const externalExecutionId = this.getExecutionId();
+				const circus = await getCircusContext(this);
 				const nodeName = this.getNode().name;
-				const baseUrl = `/api/machine/workflow-executions/${workflowExecutionId}`;
 
 				const callCircusApi = async (
 					path: string,
@@ -299,8 +308,7 @@ export class CircusAgent implements INodeType {
 							'circusApi',
 							{
 								method: 'POST',
-								baseURL: '={{$credentials.apiUrl}}',
-								url: `${baseUrl}${path}`,
+								url: `${circus.baseUrl}${path}`,
 								body,
 								json: true,
 							},
@@ -313,7 +321,7 @@ export class CircusAgent implements INodeType {
 				const logError = async (message: string): Promise<void> => {
 					await callCircusApi('/logs', {
 						idempotency_key: randomUUID(),
-						external_execution_id: externalExecutionId,
+						external_execution_id: circus.externalExecutionId,
 						node_name: nodeName,
 						worker_type: 'internal',
 						worker_slug: 'system',
@@ -325,7 +333,7 @@ export class CircusAgent implements INodeType {
 				const terminate = async (reason: string): Promise<void> => {
 					await callCircusApi('/terminate', {
 						reason,
-						external_execution_id: externalExecutionId,
+						external_execution_id: circus.externalExecutionId,
 					});
 				};
 
@@ -338,13 +346,9 @@ export class CircusAgent implements INodeType {
 				};
 
 				// Step 1 — Resolve agent configuration from snapshot
-				const webhookData = items[i].json.body as
-					| Record<string, unknown>
-					| undefined;
-				const workflowConfigSnapshot =
-					webhookData?.workflow_config_snapshot as
-						| { agent_assignments: AgentAssignment[] }
-						| undefined;
+				const workflowConfigSnapshot = getSnapshot<{
+					agent_assignments: AgentAssignment[];
+				}>(this, circus.initNodeName, 'workflow_config_snapshot', i);
 				const agentAssignments =
 					workflowConfigSnapshot?.agent_assignments ?? [];
 
@@ -387,7 +391,10 @@ export class CircusAgent implements INodeType {
 				}
 
 				// Look up AI provider credential
-				const credentialName = `circus_${agentConfig.model_provider}_api_key`;
+				const providerCapitalized =
+					agentConfig.model_provider.charAt(0).toUpperCase() +
+					agentConfig.model_provider.slice(1);
+				const credentialName = `circus${providerCapitalized}Api`;
 				let providerApiKey: string;
 				try {
 					const providerCredentials = await this.getCredentials(credentialName, i);
@@ -403,9 +410,9 @@ export class CircusAgent implements INodeType {
 				let systemContext: string | undefined;
 
 				if (includeSystemContext) {
-					const systemSnapshot = webhookData?.system_snapshot as
-						| { system_context: Record<string, string> }
-						| undefined;
+					const systemSnapshot = getSnapshot<{
+						system_context: Record<string, string>;
+					}>(this, circus.initNodeName, 'system_snapshot', i);
 					const allContext = systemSnapshot?.system_context ?? {};
 
 					const systemContextEntriesRaw = this.getNodeParameter(
@@ -446,7 +453,7 @@ export class CircusAgent implements INodeType {
 									case 'ignore_and_report':
 										await callCircusApi('/logs', {
 											idempotency_key: randomUUID(),
-											external_execution_id: externalExecutionId,
+											external_execution_id: circus.externalExecutionId,
 											node_name: nodeName,
 											worker_type: 'agent',
 											worker_slug: agentSlug,
@@ -502,7 +509,17 @@ export class CircusAgent implements INodeType {
 						requestOptions,
 					)) as Record<string, unknown>;
 				} catch (error) {
-					aiError = error as Error;
+					const axiosError = error as {
+						message: string;
+						response?: { data?: unknown; status?: number };
+					};
+					const responseData = axiosError.response?.data
+						? JSON.stringify(axiosError.response.data)
+						: '';
+					const statusCode = axiosError.response?.status ?? '';
+					aiError = new Error(
+						`${axiosError.message} [${statusCode}]${responseData ? ` | ${responseData}` : ''}`,
+					);
 				}
 
 				// Step 6 — Parse response
@@ -520,7 +537,7 @@ export class CircusAgent implements INodeType {
 
 				const logBody: Record<string, unknown> = {
 					idempotency_key: randomUUID(),
-					external_execution_id: externalExecutionId,
+					external_execution_id: circus.externalExecutionId,
 					node_name: nodeName,
 					worker_type: 'agent',
 					worker_slug: agentSlug,
@@ -586,9 +603,17 @@ export class CircusAgent implements INodeType {
 				}
 
 				// Step 9 — Success output
+				// Try to parse response as JSON; fall back to raw text
+				let parsedResponse: string | object = parsed!.responseText;
+				try {
+					parsedResponse = JSON.parse(parsed!.responseText) as object;
+				} catch {
+					// Not JSON — keep as string
+				}
+
 				returnData.push({
 					json: {
-						response: parsed!.responseText,
+						response: parsedResponse,
 						model: agentConfig.model_name,
 						model_provider: agentConfig.model_provider,
 						agent_slug: agentSlug,
