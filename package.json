@@ -1,6 +1,6 @@
 {
     "name": "n8n-nodes-circus",
-    "version": "0.1.0",
+    "version": "1.0.0",
     "description": "n8n community nodes for the Circus AI Workflow Orchestration Platform",
     "license": "MIT",
     "homepage": "",
