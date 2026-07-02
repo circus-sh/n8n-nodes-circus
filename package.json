@@ -1,15 +1,16 @@
 {
-    "name": "n8n-nodes-circus",
+    "name": "@circus-sh/n8n-nodes-circus",
     "version": "1.0.0",
     "description": "n8n community nodes for the Circus AI Workflow Orchestration Platform",
     "license": "MIT",
-    "homepage": "",
+    "homepage": "https://circus.sh",
+    "publishConfig": { "access": "public" },
     "keywords": [
         "n8n-community-node-package"
     ],
     "author": {
         "name": "Ivan Dudas",
-        "email": "ivan@ivandudas.com"
+        "email": "ivan@circus.sh"
     },
     "repository": {
         "type": "git",
