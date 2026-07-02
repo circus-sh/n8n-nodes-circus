@@ -86,6 +86,77 @@ const durationSeconds = (Date.now() - startTime) / 1000
 
 ---
 
+## 0. Init Node
+
+### Purpose
+
+Initializes the Circus execution context. Must be placed directly after the Webhook trigger node. Validates the JWT token (if present), registers execution start with the platform, and stores execution context in n8n's custom data for all downstream Circus nodes.
+
+### User Configuration (n8n UI)
+
+No user-configurable properties. The node auto-detects the webhook payload structure and JWT presence.
+
+**Credentials:** `circusApi` (required) — used for the `/logs` call to register execution start.
+
+### Runtime Behavior
+
+**Step 1 — Validate webhook payload:**
+
+Verify that the input contains `body.workflow_execution_id`. If missing, throw `NodeOperationError`.
+
+**Step 2 — Validate JWT (if present):**
+
+If `jwtPayload` is present in the input (auto-populated by n8n when the Webhook node is configured with JWT auth), validate:
+
+- `sub` matches `workflow_execution_id` from the body
+- `iss` is `"circus"`
+- `iat` is not in the future
+- `exp` is not in the past
+
+If any check fails, throw `NodeOperationError` immediately. **Do NOT call `/terminate`** — the `workflow_execution_id` may be forged or mismatched, so it cannot be trusted to identify a valid execution on the platform. The Circus background service will detect the stale execution and mark it as failed via timeout.
+
+If `jwtPayload` is not present (Webhook not configured with JWT auth), skip validation and proceed.
+
+**Step 3 — Store execution context:**
+
+Store the following in n8n's execution custom data (via `this.customData.set()`):
+
+- `circus_init_node` — this node's name (so downstream nodes can reference it dynamically via expressions)
+- `circus_workflow_execution_id` — from the webhook payload
+- `circus_external_execution_id` — n8n's internal execution ID (via `this.getExecutionId()`)
+
+Note: Custom data values are limited to 255 characters per value and 10 entries total. Only short string values (IDs, node name) are stored here. Snapshots are accessed by downstream nodes via expression evaluation against this node's output.
+
+**Step 4 — Register execution start:**
+
+Call `POST /api/machine/workflow-executions/:executionId/logs` (best-effort):
+
+```json
+{
+  "idempotency_key": "{auto-generated UUID}",
+  "external_execution_id": "{n8n's internal execution ID}",
+  "node_name": "circus-init",
+  "worker_type": "internal",
+  "worker_slug": "system",
+  "status": "success",
+  "response_payload": {
+    "message": "Execution started (external_execution_id: {n8nExecutionId})"
+  }
+}
+```
+
+If the `/logs` call fails, the node continues — execution start registration is informational and should not block the workflow.
+
+**Step 5 — Pass through:**
+
+Forward the webhook output unchanged.
+
+### Output
+
+The webhook payload, unchanged. Downstream nodes access snapshots via expression evaluation against this node's output (e.g. `$('Circus Init').item.json.body.workflow_config_snapshot`), resolved dynamically using the node name stored in custom data.
+
+---
+
 ## 1. Agent Node
 
 ### Purpose
