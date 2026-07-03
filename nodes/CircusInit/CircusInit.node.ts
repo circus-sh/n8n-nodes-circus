@@ -94,6 +94,17 @@ export class CircusInit implements INodeType {
 						);
 					}
 
+					if (
+						typeof jwtPayload.iat !== 'number' ||
+						!Number.isFinite(jwtPayload.iat)
+					) {
+						throw new NodeOperationError(
+							this.getNode(),
+							'JWT validation failed: missing or invalid iat claim',
+							{ itemIndex: i },
+						);
+					}
+
 					if (jwtPayload.iat > now) {
 						throw new NodeOperationError(
 							this.getNode(),
@@ -102,7 +113,18 @@ export class CircusInit implements INodeType {
 						);
 					}
 
-					if (jwtPayload.exp < now) {
+					if (
+						typeof jwtPayload.exp !== 'number' ||
+						!Number.isFinite(jwtPayload.exp)
+					) {
+						throw new NodeOperationError(
+							this.getNode(),
+							'JWT validation failed: missing or invalid exp claim',
+							{ itemIndex: i },
+						);
+					}
+
+					if (jwtPayload.exp <= now) {
 						throw new NodeOperationError(
 							this.getNode(),
 							'JWT validation failed: token has expired',
