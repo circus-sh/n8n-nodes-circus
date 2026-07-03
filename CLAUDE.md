@@ -16,7 +16,7 @@ Credential test endpoint: `POST /api/machine/health`
 
 | Node | Purpose | Complexity |
 |------|---------|------------|
-| CircusInit | Store webhook payload in execution data for downstream nodes | Low |
+| CircusInit | Initialize execution context, validate JWT, register execution start | Low |
 | CircusAgent | Operator-controlled AI execution — reads model, prompt, and parameters from snapshot | High |
 | CircusLog | Log workflow steps, check cost/time thresholds | Low |
 | CircusTerminate | Terminate a workflow execution on error | Low |
@@ -28,8 +28,9 @@ The Agent node requires AI provider API keys stored as n8n credentials following
 
 ## Key Design Decisions
 
-- The Circus Init node stores the webhook payload in n8n's execution custom data; all downstream nodes read context via the shared `getCircusContext()` and `getSnapshot()` helpers in `nodes/shared/circusContext.ts`
+- The Circus Init node validates the JWT (if present), stores execution context in n8n's execution custom data, and registers execution start via `/logs`. All downstream nodes read context via the shared `getCircusContext()` and `getSnapshot()` helpers in `nodes/shared/circusContext.ts`
 - All nodes extract `workflow_execution_id` from execution custom data (stored by the Init node)
+- JWT validation failures in the Init node do NOT call `/terminate` — the workflow_execution_id may be forged or mismatched, so it cannot be trusted to identify a valid execution on the platform
 - The Agent node reads its configuration from snapshots in the webhook payload — it does not hardcode API URLs, models, or prompts
 - The Agent node builds provider-specific HTTP requests (OpenAI, Anthropic, Google, xAI). Unknown providers fall back to OpenAI request structure.
 - The Log node only supports `worker_type` of `service` or `internal` — not `agent` (Agent nodes self-log)

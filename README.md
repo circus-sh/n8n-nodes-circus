@@ -22,7 +22,7 @@ Follow the [installation guide](https://docs.n8n.io/integrations/community-nodes
 
 This package provides five nodes:
 
-- **Circus Init** — Initialize the Circus execution context. Place directly after the Webhook trigger node. Stores the webhook payload in n8n's execution data so all downstream Circus nodes can access configuration snapshots and execution IDs regardless of their position in the workflow.
+- **Circus Init** — Initialize the Circus execution context. Place directly after the Webhook trigger node. Validates the JWT token (if the Webhook is configured with JWT auth), registers execution start with the platform, and stores the webhook payload in n8n's execution data so all downstream Circus nodes can access configuration snapshots and execution IDs regardless of their position in the workflow.
 - **Circus Agent** — Execute AI agent calls using operator-configured models and prompts. The agent configuration (model, prompt, parameters) is read from the workflow snapshot at runtime, allowing operators to change AI providers and prompts without editing the n8n workflow. Supports OpenAI, Anthropic, Google, and xAI providers.
 - **Circus Log** — Create log entries on the Circus platform for workflow steps. Tracks execution data, checks cost and time thresholds, and can trigger workflow termination if thresholds are exceeded.
 - **Circus Complete** — Mark a workflow execution as successfully completed and transmit result artifacts back to the Circus platform.
@@ -32,7 +32,7 @@ This package provides five nodes:
 
 ### Circus API
 
-All nodes (except Circus Init) require the **Circus API** credential, which authenticates with the Circus platform:
+All nodes require the **Circus API** credential, which authenticates with the Circus platform:
 
 - **API Key** — Circus Platform API Key (JWT token)
 - **API URL** — Base URL of your Circus platform instance (e.g. `https://your-instance.circus.sh`)
@@ -54,8 +54,8 @@ Tested with n8n version 2.25+. Requires `n8n-workflow` version 2.16.0 or later.
 
 These nodes are designed to work with the Circus platform's webhook-triggered workflow pattern:
 
-1. A **Webhook** trigger node receives the execution payload from the Circus platform.
-2. A **Circus Init** node (placed directly after the Webhook) stores the payload in execution data.
+1. A **Webhook** trigger node receives the execution payload from the Circus platform (optionally with JWT authentication).
+2. A **Circus Init** node (placed directly after the Webhook) validates the JWT token if present, registers execution start with the platform, and stores the payload in execution data.
 3. **Agent** nodes read their configuration from the stored snapshots — no hardcoded API URLs, models, or prompts in the n8n workflow.
 4. **Log** nodes record execution steps and check cost/time thresholds.
 5. The **Complete** node marks the execution as finished, or the **Terminate** node handles error cases.

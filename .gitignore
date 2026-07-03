@@ -3,3 +3,4 @@ node_modules
 nodes/Example
 .prompts
 .env
+.mcp.json
