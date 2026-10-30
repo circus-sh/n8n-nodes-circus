@@ -377,7 +377,7 @@ Extract the AI response text and token counts using provider-specific parsing vi
 **Anthropic:**
 - `inputTokens` = `usage.input_tokens`
 - `outputTokens` = `usage.output_tokens`
-- Response text = `content[0].text`
+- Response text = the `text` of every content block with `type: "text"`, concatenated in order. Other block types are ignored, most importantly `thinking`, which newer models (e.g. Claude Fable 5.1, which always thinks) put before the answer.
 
 **Google:**
 - `inputTokens` = `usageMetadata.promptTokenCount`
