@@ -8,6 +8,9 @@ This document defines five custom n8n nodes for the Circus AI Workflow Orchestra
 
 All Circus nodes share a single credential type for authenticating with the Circus platform. Defined once, reused by every node.
 
+**Credential name:** `circusApi`
+**Display name:** `Circus API`
+
 **Credential fields:**
 
 | Field | Type | Required | Description |
@@ -15,7 +18,7 @@ All Circus nodes share a single credential type for authenticating with the Circ
 | `apiKey` | string (password) | Yes | Circus Platform API Key (JWT signed with `workflow_jwt_secret`) |
 | `apiUrl` | string | Yes | Circus Platform API base URL (e.g. `https://staging.circus.sh`) |
 
-**Authentication method:** `Authorization: Bearer {apiKey}` header on all requests to `/api/machine/*` endpoints.
+**Authentication method:** `Authorization: Bearer {apiKey}` header on all requests to `/api/machine/*` endpoints. Implemented as a generic header auth type.
 
 **Credential test:** On save, call `POST {apiUrl}/api/machine/health`. If 200 with `{ "data": { "status": "ok" } }`, credentials are valid.
 
@@ -23,27 +26,56 @@ All Circus nodes share a single credential type for authenticating with the Circ
 
 ## Shared: AI Provider Credentials
 
-The Agent node requires AI provider API keys. These are stored as n8n credentials following the naming convention:
+The Agent node requires AI provider API keys. These are stored as separate n8n credential types, one per provider. The Agent node declares all supported providers in its credential configuration and resolves the correct one at runtime based on the `model_provider` value from the snapshot.
 
-```
-circus_{model_provider}_api_key
-```
+**Supported credential types:**
 
-Examples:
-- `circus_openai_api_key`
-- `circus_anthropic_api_key`
-- `circus_xai_api_key`
-- `circus_google_api_key`
+| Credential name | Display name | Auth method | Test endpoint |
+|-----------------|-------------|-------------|---------------|
+| `circusOpenaiApi` | Circus OpenAI API | `Authorization: Bearer` header | `GET https://api.openai.com/v1/models` |
+| `circusAnthropicApi` | Circus Anthropic API | `x-api-key` header + `anthropic-version: 2023-06-01` | `POST https://api.anthropic.com/v1/messages` (minimal request) |
+| `circusGoogleApi` | Circus Google AI API | API key as query parameter | `GET https://generativelanguage.googleapis.com/v1beta/models?key={apiKey}` |
+| `circusXaiApi` | Circus xAI API | `Authorization: Bearer` header | `GET https://api.x.ai/v1/models` |
 
-The Agent node reads `model_provider` from the snapshot at runtime, constructs the credential name, and looks it up. One credential per provider, shared across all Agent nodes that use that provider.
+Each credential type has a single field: `apiKey` (string, password, required).
+
+The AI provider credentials do not use n8n's `IAuthenticateGeneric` — authentication is handled manually inside the Agent node's request builder because each provider requires a different auth scheme (Bearer header, custom header, query parameter).
+
+At runtime, the Agent node maps `model_provider` from the snapshot to a credential name using the pattern `circus${capitalize(model_provider)}Api` (e.g. `openai` → `circusOpenaiApi`). If the credential is not configured in n8n, the node terminates the execution.
 
 The user configures these once in n8n's credential manager — not per node.
 
 ---
 
-## Shared: Workflow Execution ID
+## Shared: Execution Context
 
-All nodes extract `workflow_execution_id` from the webhook payload received by the n8n workflow. This value is passed through n8n's expression system from the webhook trigger node.
+The Init node stores execution context in n8n's execution custom data. All downstream Circus nodes retrieve this context via the `getCircusContext()` helper function from `nodes/shared/circusContext.ts`.
+
+**Custom data stored by Init:**
+
+| Key | Value | Description |
+|-----|-------|-------------|
+| `circus_init_node` | Node name | The Init node's display name, so downstream nodes can reference it dynamically |
+| `circus_workflow_execution_id` | String | From `body.workflow_execution_id` in the webhook payload |
+| `circus_external_execution_id` | String | n8n's internal execution ID (via `this.getExecutionId()`) |
+
+Note: Custom data values are limited to 255 characters per value and 10 entries total. Only short string values (IDs, node name) are stored here.
+
+**`getCircusContext()` returns:**
+
+```ts
+interface CircusContext {
+  workflowExecutionId: string
+  externalExecutionId: string
+  apiUrl: string
+  baseUrl: string      // ${apiUrl}/api/machine/workflow-executions/${workflowExecutionId}
+  initNodeName: string
+}
+```
+
+If the Init node has not run (custom data missing), `getCircusContext()` throws a `NodeOperationError` instructing the user to place a Circus Init node before the current node.
+
+**Snapshot access:** Downstream nodes access webhook payload snapshots (e.g. `workflow_config_snapshot`, `system_snapshot`) via the `getSnapshot()` helper, which evaluates the n8n expression `$('${initNodeName}').item.json.body.${snapshotKey}` against the Init node's output.
 
 The webhook payload structure (sent by the Circus platform when starting an execution):
 
@@ -54,13 +86,10 @@ The webhook payload structure (sent by the Circus platform when starting an exec
   "workflow_id": "1",
   "run_reason": "new",
   "workflow_config_snapshot": { ... },
-  "service_config_snapshot": { ... },
   "system_snapshot": { ... },
   "workspace_snapshot": { ... }
 }
 ```
-
-All nodes access snapshots from this webhook payload via n8n expressions.
 
 ---
 
@@ -86,32 +115,35 @@ const durationSeconds = (Date.now() - startTime) / 1000
 
 ---
 
-## 0. Init Node
+## 1. Init Node
 
 ### Purpose
 
 Initializes the Circus execution context. Must be placed directly after the Webhook trigger node. Validates the JWT token (if present), registers execution start with the platform, and stores execution context in n8n's custom data for all downstream Circus nodes.
 
+**Internal name:** `circusInit`
+**Group:** `input`
+
 ### User Configuration (n8n UI)
 
-No user-configurable properties. The node auto-detects the webhook payload structure and JWT presence.
-
 **Credentials:** `circusApi` (required) — used for the `/logs` call to register execution start.
+
+No additional user-configurable properties (the properties array is empty). The node auto-detects the webhook payload structure and JWT presence.
 
 ### Runtime Behavior
 
 **Step 1 — Validate webhook payload:**
 
-Verify that the input contains `body.workflow_execution_id`. If missing, throw `NodeOperationError`.
+Verify that the input contains `body` and `body.workflow_execution_id`. If `body` is missing, throw `NodeOperationError` ("No webhook payload found. Place this node directly after a Webhook trigger node."). If `workflow_execution_id` is missing, throw `NodeOperationError` ("Missing workflow_execution_id in webhook payload.").
 
 **Step 2 — Validate JWT (if present):**
 
-If `jwtPayload` is present in the input (auto-populated by n8n when the Webhook node is configured with JWT auth), validate:
+If `jwtPayload` is present in the input item (auto-populated by n8n when the Webhook node is configured with JWT auth), validate:
 
-- `sub` matches `workflow_execution_id` from the body
+- `sub` matches `workflow_execution_id` from the body (string comparison)
 - `iss` is `"circus"`
-- `iat` is not in the future
-- `exp` is not in the past
+- `iat` must be a finite number (`typeof === 'number' && Number.isFinite()`), and not in the future (compared to `Math.floor(Date.now() / 1000)`)
+- `exp` must be a finite number (`typeof === 'number' && Number.isFinite()`), and not expired (`exp <= now` means expired, per RFC 7519)
 
 If any check fails, throw `NodeOperationError` immediately. **Do NOT call `/terminate`** — the `workflow_execution_id` may be forged or mismatched, so it cannot be trusted to identify a valid execution on the platform. The Circus background service will detect the stale execution and mark it as failed via timeout.
 
@@ -124,8 +156,6 @@ Store the following in n8n's execution custom data (via `this.customData.set()`)
 - `circus_init_node` — this node's name (so downstream nodes can reference it dynamically via expressions)
 - `circus_workflow_execution_id` — from the webhook payload
 - `circus_external_execution_id` — n8n's internal execution ID (via `this.getExecutionId()`)
-
-Note: Custom data values are limited to 255 characters per value and 10 entries total. Only short string values (IDs, node name) are stored here. Snapshots are accessed by downstream nodes via expression evaluation against this node's output.
 
 **Step 4 — Register execution start:**
 
@@ -145,37 +175,56 @@ Call `POST /api/machine/workflow-executions/:executionId/logs` (best-effort):
 }
 ```
 
-If the `/logs` call fails, the node continues — execution start registration is informational and should not block the workflow.
+If the `/logs` call fails, the node continues — execution start registration is informational and should not block the workflow. The error is silently swallowed.
 
 **Step 5 — Pass through:**
 
-Forward the webhook output unchanged.
+Forward the webhook input item unchanged.
 
 ### Output
 
 The webhook payload, unchanged. Downstream nodes access snapshots via expression evaluation against this node's output (e.g. `$('Circus Init').item.json.body.workflow_config_snapshot`), resolved dynamically using the node name stored in custom data.
 
+### Error Handling
+
+`NodeOperationError` is re-thrown directly for validation failures. For unexpected errors, the node checks `continueOnFail()` — if true, pushes `{ json: { error: message } }` to output; otherwise throws `NodeOperationError`.
+
 ---
 
-## 1. Agent Node
+## 2. Agent Node
 
 ### Purpose
 
 Enables operator-controlled AI execution. The operator configures models, prompts, and agents in the Circus UI. The workflow developer places the Agent node in n8n and specifies which agent (by slug) to use. The Agent node reads the snapshot to determine which model, prompt, parameters, and API endpoint to use at runtime — no hardcoded AI provider configuration in n8n.
 
+**Internal name:** `circusAgent`
+**Group:** `output`
+
 **Why this node exists:** Without it, changing a model from GPT-4o to Claude, or updating a prompt, requires editing the n8n workflow. With the Agent node, the operator makes these changes in the Circus UI and the next execution automatically uses the new configuration.
 
 ### User Configuration (n8n UI)
 
-**Main tab:**
+**Credentials declared in node description:**
+
+| Credential name | Display name | Required |
+|-----------------|-------------|----------|
+| `circusApi` | Circus Platform API | Yes |
+| `circusOpenaiApi` | OpenAI API Key | No |
+| `circusAnthropicApi` | Anthropic API Key | No |
+| `circusGoogleApi` | Google AI API Key | No |
+| `circusXaiApi` | xAI API Key | No |
+
+All AI provider credentials are declared as optional in the node description. At runtime, the node determines which one to use based on `model_provider` from the snapshot.
+
+**Main tab properties:**
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `agentSlug` | string | Yes | — | Agent slug matching an entry in `workflow_config_snapshot.agent_assignments[].agent_slug` |
-| `inputText` | string | No | — | The work item to process. Supports n8n expressions — can reference previous node output, webhook payload fields (e.g. workspace snapshot), or static text. Sent as a separate user message after the prompt. |
-| `includeSystemContext` | boolean | No | false | Whether to include system context entries in the prompt |
-| `systemContextEntries` | string[] | No | all | Specific system context keys to include (if `includeSystemContext` is true). Empty means all. |
-| `missingContextBehavior` | enum | No | `ignore` | How to handle missing system context entries: `ignore`, `ignore_and_report`, `fail` |
+| `agentSlug` | string | Yes | `''` | Agent slug matching an entry in `workflow_config_snapshot.agent_assignments[].agent_slug` |
+| `inputText` | string | No | `''` | The work item to process. Supports n8n expressions — can reference previous node output, webhook payload fields (e.g. workspace snapshot), or static text. Sent as a separate user message after the prompt. Multi-line input (4 rows). |
+| `includeSystemContext` | boolean | No | `false` | Whether to include system context entries in the prompt |
+| `systemContextEntries` | string | No | `''` | Comma-separated list of system context keys to include (if `includeSystemContext` is true). Empty means all. Only shown when `includeSystemContext` is true. |
+| `missingContextBehavior` | options | No | `ignore` | How to handle missing system context entries: `fail`, `ignore`, `ignore_and_report`. Only shown when `includeSystemContext` is true. |
 
 **Advanced/Settings tab:**
 
@@ -191,7 +240,7 @@ const startTime = Date.now()
 
 **Step 1 — Resolve agent configuration from snapshot:**
 
-Read `workflow_config_snapshot.agent_assignments[]` from the webhook payload. Find the entry where `agent_slug` matches the configured `agentSlug`.
+Call `getSnapshot()` to retrieve `workflow_config_snapshot` from the Init node's output. Find the entry in `agent_assignments[]` where `agent_slug` matches the configured `agentSlug`.
 
 Snapshot entry structure:
 ```json
@@ -216,7 +265,7 @@ Snapshot entry structure:
 If no matching entry found:
 1. Call `POST /api/machine/workflow-executions/:executionId/logs` with error log
 2. Call `POST /api/machine/workflow-executions/:executionId/terminate` with `external_execution_id` and reason: `"Agent slug '{agentSlug}' not found in workflow configuration snapshot"`
-3. Throw validation error.
+3. Throw `NodeOperationError`.
 
 **Step 2 — Validate agent parameters:**
 
@@ -224,28 +273,31 @@ From the resolved snapshot entry, verify:
 - `model_provider` is defined and non-empty
 - `model_name` is defined and non-empty
 - `model_base_url` is defined and non-empty
-- Corresponding AI provider API key exists in n8n credentials (named `circus_{model_provider}_api_key`)
 - `max_tokens` is a positive integer
 - `temperature` is between 0 and 2 (inclusive)
+- Corresponding AI provider API key exists in n8n credentials — the credential name is constructed as `circus${capitalize(model_provider)}Api` (e.g. `openai` → `circusOpenaiApi`)
 
 If any validation fails:
 1. Call `/logs` endpoint with error log
 2. Call `/terminate` endpoint with `external_execution_id` and reason describing the missing parameter.
-3. Throw validation error.
+3. Throw `NodeOperationError`.
 
 **Step 3 — Build prompt with system context:**
 
 If `includeSystemContext` is true:
-- Read `system_snapshot.system_context` from the webhook payload
+- Call `getSnapshot()` to retrieve `system_snapshot` from the Init node's output
+- Read `system_context` (a `Record<string, string>`) from the system snapshot
 - If `systemContextEntries` is empty: include all entries
-- If `systemContextEntries` is specified: include only listed keys
-  - For each specified key not found in `system_snapshot.system_context`, apply `missingContextBehavior`:
+- If `systemContextEntries` is specified: split comma-separated string, trim whitespace, include only listed keys
+  - For each specified key not found in `system_context`, apply `missingContextBehavior`:
     - `ignore`: skip silently
     - `ignore_and_report`: skip, but call `/logs` with a warning log reporting the missing key
-    - `fail`: call `/logs` with error, call `/terminate` with `external_execution_id`, throw validation error
+    - `fail`: call `/logs` with error, call `/terminate` with `external_execution_id`, throw `NodeOperationError`
 
-Assemble the final prompt in three parts:
-- **System message:** system context entries (concatenated or structured as key-value pairs)
+Build the system context string as `key: value` pairs joined by newlines.
+
+Assemble the final prompt in up to three parts:
+- **System message:** system context string (only if non-empty)
 - **User message 1 (instruction):** `prompt_text` from the snapshot
 - **User message 2 (input):** `inputText` from the node configuration — the actual work item to process
 
@@ -270,6 +322,7 @@ Read `model_provider` from the snapshot. Build the request body based on the pro
   "max_tokens": 4096
 }
 ```
+The system message is omitted if there is no system context. Auth via `Authorization: Bearer {apiKey}` header.
 
 **Anthropic:**
 ```json
@@ -284,6 +337,7 @@ Read `model_provider` from the snapshot. Build the request body based on the pro
   "max_tokens": 4096
 }
 ```
+The `system` field is omitted if there is no system context. The `temperature` field is omitted for the `claude-opus-4-8` model (provider limitation). Auth via `x-api-key: {apiKey}` header plus `anthropic-version: 2023-06-01` header.
 
 **Google:**
 ```json
@@ -299,59 +353,33 @@ Read `model_provider` from the snapshot. Build the request body based on the pro
   }
 }
 ```
+The `system_instruction` field is omitted if there is no system context. Auth via `?key={apiKey}` query parameter appended to the URL.
 
 The provider switch uses `model_provider` value. Unknown providers fall back to the OpenAI request structure.
 
-**NOTE:** When a new AI provider is added to the Circus platform's model registry, a corresponding case should be added to the Agent node's request builder and response parser. Until then, the node falls back to OpenAI structure, which may or may not work with the new provider.
+**NOTE:** When a new AI provider is added to the Circus platform's model registry, a corresponding case should be added to the Agent node's `buildProviderRequest()` and `parseProviderResponse()` functions. Until then, the node falls back to OpenAI structure, which may or may not work with the new provider.
 
 **Step 5 — Execute AI API call:**
 
-Make the HTTP request to `model_base_url` with:
-- The provider-specific request body from Step 4
-- API key from n8n credentials (`circus_{model_provider}_api_key`)
-- Appropriate headers per provider (e.g. `Content-Type: application/json`, Anthropic requires `anthropic-version` header)
+Make the HTTP request to `model_base_url` using `this.helpers.httpRequest()` (not `httpRequestWithAuthentication` — auth is handled manually in the request builder). On error, the node captures the status code and response body for logging but does not throw yet.
 
 **Step 6 — Parse response and extract token usage:**
 
-Extract the AI response text and token counts using provider-specific parsing:
+Extract the AI response text and token counts using provider-specific parsing via `parseProviderResponse()`:
 
 **OpenAI / xAI / default:**
-```json
-{
-  "usage": {
-    "prompt_tokens": 1200,
-    "completion_tokens": 340
-  }
-}
-```
-- `input_size` = `usage.prompt_tokens`
-- `output_size` = `usage.completion_tokens`
+- `inputTokens` = `usage.prompt_tokens`
+- `outputTokens` = `usage.completion_tokens`
 - Response text = `choices[0].message.content`
 
 **Anthropic:**
-```json
-{
-  "usage": {
-    "input_tokens": 1200,
-    "output_tokens": 340
-  }
-}
-```
-- `input_size` = `usage.input_tokens`
-- `output_size` = `usage.output_tokens`
+- `inputTokens` = `usage.input_tokens`
+- `outputTokens` = `usage.output_tokens`
 - Response text = `content[0].text`
 
 **Google:**
-```json
-{
-  "usageMetadata": {
-    "promptTokenCount": 1200,
-    "candidatesTokenCount": 340
-  }
-}
-```
-- `input_size` = `usageMetadata.promptTokenCount`
-- `output_size` = `usageMetadata.candidatesTokenCount`
+- `inputTokens` = `usageMetadata.promptTokenCount`
+- `outputTokens` = `usageMetadata.candidatesTokenCount`
 - Response text = `candidates[0].content.parts[0].text`
 
 **Step 7 — Log the result:**
@@ -402,11 +430,13 @@ The `/logs` endpoint returns:
 
 If `abort` is `true`:
 1. Call `POST /api/machine/workflow-executions/:executionId/terminate` with `external_execution_id` and reason: `"Execution aborted: cost or time threshold exceeded"`
-2. Throw an error with "Execution aborted: cost or time threshold exceeded"
+2. Throw `NodeOperationError` with "Execution aborted: cost or time threshold exceeded"
 
 **Step 8 — Handle errors:**
 
 If the AI API call returned an error, the error is already logged in Step 7. The node then throws `NodeApiError` (API failure, not a configuration error).
+
+**Note:** All `/logs` and `/terminate` calls made by the Agent node are best-effort — if the platform API call itself fails, the error is silently swallowed and the node continues with its primary error handling logic. This prevents a platform outage from masking the original AI API error.
 
 **Path 1 — On Error: Stop Workflow (n8n built-in, recommended):**
 
@@ -432,7 +462,7 @@ If the AI API call succeeded and `abort` is false, the node outputs:
 
 ```json
 {
-  "response": "the AI response text",
+  "response": "the AI response text (parsed as JSON if valid, raw string otherwise)",
   "model": "GPT-4o",
   "model_provider": "openai",
   "agent_slug": "script_writer",
@@ -444,139 +474,7 @@ If the AI API call succeeded and `abort` is false, the node outputs:
 }
 ```
 
----
-
-## 2. Service Node
-
-### Purpose
-
-Executes external service API calls using configuration from the service_config_snapshot. The operator configures service URLs, headers, methods, and retry policies in the Circus UI. The workflow developer places the Service node and specifies the service slug.
-
-### User Configuration (n8n UI)
-
-**Main tab:**
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `serviceSlug` | string | Yes | — | Service slug matching an entry in `service_config_snapshot.service_assignments[].service_slug` |
-
-**Payload tab:**
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `requestBody` | json | No | — | Payload to send with the API call. Works like n8n's HTTP Request node — developer configures freely. |
-
-URL, headers, or method configuration — all provided by the snapshot.
-Retry settings provided in the snapshot are ignored. Retries configured by n8n's built-in settings tab.
-
-### Runtime Behavior
-
-**Step 0 — Start duration timer.**
-
-**Step 1 — Resolve service configuration from snapshot:**
-
-Read `service_config_snapshot.service_assignments[]` from the webhook payload. Find the entry where `service_slug` matches the configured `serviceSlug`.
-
-Snapshot entry structure:
-```json
-{
-  "service_slug": "elevenlabs-tts",
-  "api_url": "https://api.elevenlabs.io/v1/text-to-speech/{{VOICE_ID}}/with-timestamps",
-  "compiled_api_url": "https://api.elevenlabs.io/v1/text-to-speech/abc123def456/with-timestamps",
-  "method": "POST",
-  "num_retries": 2,
-  "unit": "characters",
-  "per_unit": 1000,
-  "headers": [
-    { "name": "xi-api-key", "value": "{{ELEVENLABS_API_KEY}}" }
-  ],
-  "variables": [
-    { "name": "VOICE_ID", "value": "abc123def456" }
-  ]
-}
-```
-
-If no matching entry found (permanent failure):
-1. Call `/logs` with error log
-2. Call `/terminate` with `external_execution_id` and reason: `"Service slug '{serviceSlug}' not found in service configuration snapshot"`
-3. Throw `NodeOperationError` with the same message. If On Error is "Stop Workflow", n8n halts. If On Error is "Continue", the platform's remote stop kills the execution.
-
-If the snapshot entry exists, the node assumes all values are valid and uses them as provided without additional checks.
-
-**Step 2 — Resolve header variables:**
-
-For each header in the snapshot entry, check for `{{...}}` patterns. For each variable:
-1. Look up in n8n environment variables via the workflow data proxy (`$env`). The user must configure these as environment variables on their n8n instance (e.g. `ELEVENLABS_API_KEY=sk-xxx` in the `.env` file or Docker environment).
-2. If not found: call `/logs` with a warning log explaining the unresolved variable. Do NOT halt the workflow — let the API call proceed (it may still succeed, or the external service error will be caught in Step 3).
-
-n8n credentials (`getCredentials()`) are not used for header variable resolution because credential types must be declared statically in the node's description — they cannot be resolved dynamically from snapshot data at runtime.
-
-Use `compiled_api_url` from the snapshot (URL variables already resolved by the platform).
-
-**Step 3 — Execute service API call:**
-
-Make the HTTP request using:
-- URL: `compiled_api_url` from snapshot
-- Method: `method` from snapshot
-- Headers: resolved headers from Step 2
-- Body: `requestBody` from user configuration
-
-**Step 4 — Handle errors:**
-
-`num_retries` from the snapshot is ignored — retries are handled by n8n's built-in "Retry On Fail" setting. See note 7 in the open notes.
-
-If the service API call failed:
-
-1. Call `/logs` with error log (auto-generated idempotency key)
-2. Check `/logs` response for `abort` flag — if `abort` is true, call `/terminate` with `external_execution_id`.
-3. Read node settings: `this.continueOnFail()`, `node.retryOnFail`
-
-**Path 1 — On Error: Stop Workflow (n8n built-in, recommended):**
-
-- If "Retry On Fail" is enabled:
-  - Do NOT call `/terminate` — let n8n retry.
-  - Throw `NodeApiError`. n8n may repeat the entire node's execute() from scratch. This will include a new service API call (with potential additional cost) and new logs with a new idempotency key.
-  - The node cannot know if retries are exhausted. If n8n eventually gives up, the Circus background service detects the stale execution and marks it as failed.
-- If "Retry On Fail" is not enabled:
-  - Call `/terminate` with `external_execution_id` immediately — no retry is coming.
-  - Throw `NodeApiError`.
-
-**Path 2 — On Error: anything other than "Stop Workflow" (Continue variants):**
-
-The node detects this via `this.continueOnFail()`. Instead of letting n8n continue in a broken state:
-
-1. Call `/terminate` with `external_execution_id` to trigger remote termination. The platform calls n8n's `POST /api/v1/executions/{id}/stop` to kill the execution.
-2. Throw `NodeApiError`.
-3. n8n catches the error and retries or continues — but the platform's remote stop kills the execution. The remote termination may arrive after n8n has already continued to the next node, but that is acceptable.
-
-**Step 5 — Success output:**
-
-Calculate duration:
-```ts
-const durationSeconds = (Date.now() - startTime) / 1000
-```
-
-If the service API call succeeded, the node passes forward:
-
-```json
-{
-  "response": "the service API response body",
-  "statusCode": 200,
-  "service_slug": "elevenlabs-tts",
-  "worker_type": "service",
-  "worker_slug": "elevenlabs-tts",
-  "node_name": "{user-defined node name in n8n}",
-  "unit": "characters",
-  "per_unit": 1000,
-  "duration_seconds": 2.15,
-  "request_payload": { "the request sent to the service" },
-  "response_payload": { "the service response" }
-}
-```
-
-This output contains the fields needed by the Log node to create a cost log entry. The workflow developer is expected to place a Log node after the Service node (or after intermediate processing to extract the consumption count).
-
-**Important:** The Service node does NOT auto-log on success. Cost reporting requires the developer to use a Log node because the consumption count (`input_size`/`output_size`) may need extraction from the service response, which is service-specific.
+The `cost_consumed` value comes from the `/logs` response. If the log response data is unavailable, it defaults to `0`.
 
 ---
 
@@ -584,9 +482,12 @@ This output contains the fields needed by the Log node to create a cost log entr
 
 ### Purpose
 
-Creates a log entry on the Circus platform for any workflow step. Used after Service nodes, custom HTTP nodes, or any step where the developer wants to record execution data and check cost/time thresholds.
+Creates a log entry on the Circus platform for any workflow step. Used after custom HTTP nodes or any step where the developer wants to record execution data and check cost/time thresholds.
 
 Not used for Agent nodes — Agent nodes handle their own logging internally.
+
+**Internal name:** `circusLog`
+**Group:** `output`
 
 ### User Configuration (n8n UI)
 
@@ -594,22 +495,24 @@ Not used for Agent nodes — Agent nodes handle their own logging internally.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `nodeName` | string | Yes | — | Name of the workflow step being logged |
-| `workerType` | enum | Yes | — | `service` or `internal` only. Agent is not available — Agent nodes self-log. |
-| `workerSlug` | string | Yes | — | Slug identifying the service for cost lookup (when `workerType` is `service`). For `internal`, use a descriptive slug. |
-| `status` | enum | Yes | — | `success` or `error` |
-| `durationSeconds` | number | No | — | Step execution time in seconds |
-| `inputSize` | number | No | — | Consumption input (service-defined units for services, 0 for internal) |
-| `outputSize` | number | No | — | Consumption output (service-defined units for services, 0 for internal) |
-| `errorMessage` | string | No | — | Error description (for failed steps) |
-| `requestPayload` | json | No | — | Request data to store |
-| `responsePayload` | json | No | — | Response data to store |
+| `nodeName` | string | Yes | `''` | Name of the workflow step being logged |
+| `workerType` | options | Yes | `internal` | `service` or `internal` only. Agent is not available — Agent nodes self-log. |
+| `workerSlug` | string | Yes | `''` | Slug identifying the service for cost lookup (when `workerType` is `service`). For `internal`, use a descriptive slug. |
+| `status` | options | Yes | `success` | `success` or `error` |
+| `durationSeconds` | number | No | `0` | Step execution time in seconds |
+| `inputSize` | number | No | `0` | Consumption input (service-defined units for services, 0 for internal) |
+| `outputSize` | number | No | `0` | Consumption output (service-defined units for services, 0 for internal) |
+| `errorMessage` | string | No | `''` | Error description (only shown when `status` is `error`) |
+| `requestPayload` | json | No | `''` | Request data to store |
+| `responsePayload` | json | No | `''` | Response data to store |
 
-The  `external_execution_id` is automatically added to the request by the node.
+The `external_execution_id` is automatically added to the request by the node via `getCircusContext()`.
+
+**Subtitle:** Displays `{workerType} / {status}` dynamically.
 
 **Advanced/Settings tab:**
 
-No custom retry or terminate configuration. Use n8n's built-in "Retry On Fail" setting for transient /log endpoint failures. 
+No custom retry or terminate configuration. Use n8n's built-in "Retry On Fail" setting for transient /log endpoint failures.
 
 ### API Call
 
@@ -636,7 +539,11 @@ No custom retry or terminate configuration. Use n8n's built-in "Retry On Fail" s
 
 Note: `model` and `model_provider` fields are NOT sent — they are only relevant for `worker_type = agent`, which this node does not support.
 
-The `idempotency_key` is auto-generated. If the `/log` call is retried, the same key is reused to prevent duplicate rows.
+Optional fields (`durationSeconds`, `inputSize`, `outputSize`, `errorMessage`, `requestPayload`, `responsePayload`) are only included in the request body if they have truthy values.
+
+The `idempotency_key` is auto-generated per execution. If the `/log` call is retried by n8n, the same key is reused to prevent duplicate rows.
+
+The API call uses `httpRequestWithAuthentication('circusApi', ...)` which automatically injects the Bearer token.
 
 ### Response Handling
 
@@ -657,7 +564,7 @@ Response:
 
 If `abort` is `true`:
 1. Call `POST /api/machine/workflow-executions/:executionId/terminate` with `external_execution_id` and reason: `"Execution aborted: cost or time threshold exceeded"`
-2. Throw an error
+2. Throw `NodeOperationError`
 
 If `abort` is `false`: continue workflow execution.
 
@@ -699,14 +606,18 @@ If `abort` is `false`: continue workflow execution.
 
 ### Purpose
 
-Terminates a workflow execution on the Circus platform due to an error. This node is intended to be the **last node** in the workflow in an error branch. Should not be used with nodes that self-terminate (Agent, Service, or Log).
+Terminates a workflow execution on the Circus platform due to an error. This node is intended to be the **last node** in the workflow in an error branch. Should not be used with nodes that self-terminate (Agent or Log).
+
+**Internal name:** `circusTerminate`
+**Group:** `output`
 
 ### User Configuration (n8n UI)
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `workflowExecutionId` | string | Yes | — | The workflow execution ID from the webhook payload |
-| `reason` | string | No | — | Termination reason. Supports static text or dynamic n8n expressions. |
+| `reason` | string | No | `''` | Termination reason. Supports static text or dynamic n8n expressions. |
+
+The `workflow_execution_id` and `external_execution_id` are obtained automatically via `getCircusContext()` — not configured by the user.
 
 ### API Call
 
@@ -721,14 +632,15 @@ Terminates a workflow execution on the Circus platform due to an error. This nod
 }
 ```
 
-The `external_execution_id` is obtained automatically from n8n's runtime context — not configured by the user.
+The API call uses `httpRequestWithAuthentication('circusApi', ...)` which automatically injects the Bearer token.
 
 ### Runtime Behavior
 
-1. Make the API call to `/terminate` with `external_execution_id`
-2. On success: return output data. 
-3. On failure:
-   - Attempt to record a log entry by calling `/logs`
+1. Read `reason` parameter and call `getCircusContext()`.
+2. Make the API call to `/terminate` with `external_execution_id`.
+3. On success: return output data.
+4. On failure:
+   - Attempt to record a log entry by calling `/logs` (best-effort, node_name: `'circus-terminate'`, worker_type: `'internal'`, status: `'error'`)
    - Throw `NodeApiError`
 
 ### Output
@@ -748,17 +660,22 @@ The `external_execution_id` is obtained automatically from n8n's runtime context
 
 Marks a workflow execution as successfully completed on the Circus platform and transmits the result artifacts. This node is intended to be used as the last node in the success branch of the workflow and to transmit ALL resulting artifacts back to the platform. Executing this node will mark the execution as completed in the Circus platform, but it will not automatically stop the workflow execution.
 
+**Internal name:** `circusComplete`
+**Group:** `output`
+
 ### User Configuration (n8n UI)
 
 **Main tab:**
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `resultPayload` | json | Yes | — | JSON object containing the workflow output. Structure is plugin-specific and opaque to the node. |
+| `resultPayload` | json | Yes | `'{}'` | JSON object containing the workflow output. Structure is plugin-specific and opaque to the node — the node does not validate its contents. |
+
+The `workflow_execution_id` and `external_execution_id` are obtained automatically via `getCircusContext()` — not configured by the user.
 
 **Advanced/Settings tab:**
 
-No custom retry configuration. Use n8n's built-in "Retry On Fail" setting for transient /complete endpoint failures. 
+No custom retry configuration. Use n8n's built-in "Retry On Fail" setting for transient /complete endpoint failures.
 
 ### API Call
 
@@ -773,7 +690,9 @@ No custom retry configuration. Use n8n's built-in "Retry On Fail" setting for tr
 }
 ```
 
-The `result_payload` is the value from the `resultPayload` configuration field.
+The `result_payload` is the parsed value from the `resultPayload` configuration field.
+
+The API call uses `httpRequestWithAuthentication('circusApi', ...)` which automatically injects the Bearer token.
 
 Example:
 ```json
@@ -870,13 +789,13 @@ When any node needs to log an error to the Circus platform (before terminating o
   "status": "error",
   "error_message": "{descriptive error message}",
   "request_payload": null,
-  "response_payload": null,
+  "response_payload": null
 }
 ```
 
-The `external_execution_id` is included in every API call (see note 6). If the platform hasn't stored it yet, it patches the database on first encounter.
+The `external_execution_id` is included in every API call. If the platform hasn't stored it yet, it patches the database on first encounter.
 
-For Agent and Service nodes logging their own API call results, `worker_type` and `worker_slug` match the agent/service being executed, not `internal`/`system`.
+For Agent nodes logging their own API call results, `worker_type` and `worker_slug` match the agent being executed, not `internal`/`system`.
 
 ---
 
@@ -893,7 +812,7 @@ When any node needs to terminate the remote execution:
 }
 ```
 
-The `external_execution_id` is obtained from n8n's runtime context. The platform uses it to call n8n's `POST /api/v1/executions/{id}/stop` to kill the workflow remotely.
+The `external_execution_id` is obtained from n8n's runtime context via `getCircusContext()`. The platform uses it to call n8n's `POST /api/v1/executions/{id}/stop` to kill the workflow remotely.
 
 After calling terminate, the node's behavior depends on the failure type and settings:
 - **Permanent failure (missing config, validation, threshold breach):** call `/terminate`, throw an error. The platform's remote stop kills the execution.
@@ -907,11 +826,29 @@ After calling terminate, the node's behavior depends on the failure type and set
 
 ### Package name
 
-`@circus-sh/n8n-nodes-circus`
+`@circus_sh/n8n-nodes-circus`
 
 ### Structure
 
-The package must follow the n8n community nodes starter template. Scaffold using n8n's official tooling. Do not create a custom directory structure.
+The package follows the n8n community nodes starter template. Key directories:
+
+```
+nodes/
+├── CircusInit/CircusInit.node.ts
+├── CircusAgent/CircusAgent.node.ts
+├── CircusLog/CircusLog.node.ts
+├── CircusTerminate/CircusTerminate.node.ts
+├── CircusComplete/CircusComplete.node.ts
+└── shared/circusContext.ts
+credentials/
+├── CircusApi.credentials.ts
+├── CircusOpenaiApi.credentials.ts
+├── CircusAnthropicApi.credentials.ts
+├── CircusGoogleApi.credentials.ts
+└── CircusXaiApi.credentials.ts
+```
+
+All nodes have `usableAsTool: true` set, allowing them to be used as tools in n8n's AI agent workflows.
 
 ### Publishing
 
@@ -926,4 +863,10 @@ After publishing, submit for verification through the n8n Creator Portal.
 
 ### Provider Extensibility Note
 
-When a new AI provider is added to the Circus platform's model registry, the Agent node needs a corresponding case in its request builder (Step 4) and response parser (Step 6). Until a case is added, unknown providers fall back to the OpenAI request structure. This is a maintenance point — document new provider additions in the changelog.
+When a new AI provider is added to the Circus platform's model registry, the Agent node needs:
+1. A new credential type in `credentials/` (e.g. `CircusNewProviderApi.credentials.ts`)
+2. A new entry in the Agent node's `credentials` array in its description
+3. A corresponding case in `buildProviderRequest()` (request builder)
+4. A corresponding case in `parseProviderResponse()` (response parser)
+
+Until these are added, unknown providers fall back to the OpenAI request structure, which may or may not work with the new provider. Document new provider additions in the changelog.
