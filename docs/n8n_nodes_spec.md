@@ -159,7 +159,7 @@ Store the following in n8n's execution custom data (via `this.customData.set()`)
 
 **Step 4 — Register execution start:**
 
-Call `POST /api/machine/workflow-executions/:executionId/logs` (best-effort):
+Call `POST /api/machine/workflow-executions/:executionId/logs` (required):
 
 ```json
 {
@@ -175,7 +175,7 @@ Call `POST /api/machine/workflow-executions/:executionId/logs` (best-effort):
 }
 ```
 
-If the `/logs` call fails, the node continues — execution start registration is informational and should not block the workflow. The error is silently swallowed.
+This call is how the platform learns the `external_execution_id`. Without it, the platform cannot monitor or remotely stop the n8n execution (test webhooks in particular never return an execution id in the webhook response). If the call fails (non-2xx response or network error), throw `NodeApiError` with the message `"Failed to register execution start with Circus: {error}"` and the request URL in the description, so a misconfigured API URL is easy to spot. The workflow fails regardless of the `continueOnFail` setting. Do **not** call `/terminate` — it would go to the same unreachable or misconfigured endpoint.
 
 **Step 5 — Pass through:**
 
@@ -187,7 +187,7 @@ The webhook payload, unchanged. Downstream nodes access snapshots via expression
 
 ### Error Handling
 
-`NodeOperationError` is re-thrown directly for validation failures. For unexpected errors, the node checks `continueOnFail()` — if true, pushes `{ json: { error: message } }` to output; otherwise throws `NodeOperationError`.
+`NodeOperationError` is re-thrown directly for validation failures, and `NodeApiError` for a failed execution start registration (Step 4). For unexpected errors, the node checks `continueOnFail()` — if true, pushes `{ json: { error: message } }` to output; otherwise throws `NodeOperationError`.
 
 ---
 
@@ -262,6 +262,8 @@ Snapshot entry structure:
 }
 ```
 
+`temperature` may be `null` or absent. The platform sends `null` for models that don't accept a temperature parameter, and the node then omits it from the provider request (see Step 4). `0` is a valid value (most deterministic output) and is always sent.
+
 If no matching entry found:
 1. Call `POST /api/machine/workflow-executions/:executionId/logs` with error log
 2. Call `POST /api/machine/workflow-executions/:executionId/terminate` with `external_execution_id` and reason: `"Agent slug '{agentSlug}' not found in workflow configuration snapshot"`
@@ -274,7 +276,7 @@ From the resolved snapshot entry, verify:
 - `model_name` is defined and non-empty
 - `model_base_url` is defined and non-empty
 - `max_tokens` is a positive integer
-- `temperature` is between 0 and 2 (inclusive)
+- `temperature`, if not `null`/absent, is a number between 0 and 2 (inclusive)
 - Corresponding AI provider API key exists in n8n credentials — the credential name is constructed as `circus${capitalize(model_provider)}Api` (e.g. `openai` → `circusOpenaiApi`)
 
 If any validation fails:
@@ -322,7 +324,7 @@ Read `model_provider` from the snapshot. Build the request body based on the pro
   "max_tokens": 4096
 }
 ```
-The system message is omitted if there is no system context. Auth via `Authorization: Bearer {apiKey}` header.
+The system message is omitted if there is no system context. `temperature` is omitted if it is `null`/absent in the snapshot. Auth via `Authorization: Bearer {apiKey}` header.
 
 **Anthropic:**
 ```json
@@ -337,7 +339,7 @@ The system message is omitted if there is no system context. Auth via `Authoriza
   "max_tokens": 4096
 }
 ```
-The `system` field is omitted if there is no system context. The `temperature` field is omitted for the `claude-opus-4-8` model (provider limitation). Auth via `x-api-key: {apiKey}` header plus `anthropic-version: 2023-06-01` header.
+The `system` field is omitted if there is no system context. `temperature` is omitted if it is `null`/absent in the snapshot. Auth via `x-api-key: {apiKey}` header plus `anthropic-version: 2023-06-01` header.
 
 **Google:**
 ```json
@@ -353,7 +355,7 @@ The `system` field is omitted if there is no system context. The `temperature` f
   }
 }
 ```
-The `system_instruction` field is omitted if there is no system context. Auth via `?key={apiKey}` query parameter appended to the URL.
+The `system_instruction` field is omitted if there is no system context. `generationConfig.temperature` is omitted if `temperature` is `null`/absent in the snapshot. Auth via `?key={apiKey}` query parameter appended to the URL.
 
 The provider switch uses `model_provider` value. Unknown providers fall back to the OpenAI request structure.
 
