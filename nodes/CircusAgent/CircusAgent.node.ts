@@ -130,13 +130,18 @@ function parseProviderResponse(
 ): ParsedResponse {
 	switch (provider) {
 		case 'anthropic': {
-			const content = responseData.content as Array<{ text: string }>;
+			// Content may start with a `thinking` block (always on for newer
+			// models) and the answer may span several `text` blocks
+			const content = responseData.content as Array<{ type: string; text?: string }>;
 			const usage = responseData.usage as {
 				input_tokens: number;
 				output_tokens: number;
 			};
 			return {
-				responseText: content?.[0]?.text ?? '',
+				responseText: (content ?? [])
+					.filter((block) => block.type === 'text')
+					.map((block) => block.text ?? '')
+					.join(''),
 				inputTokens: usage?.input_tokens ?? 0,
 				outputTokens: usage?.output_tokens ?? 0,
 			};
