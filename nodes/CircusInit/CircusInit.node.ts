@@ -4,8 +4,9 @@ import type {
 	INodeExecutionData,
 	INodeType,
 	INodeTypeDescription,
+	JsonObject,
 } from 'n8n-workflow';
-import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 
 interface JwtPayload {
 	sub: string;
@@ -142,6 +143,7 @@ export class CircusInit implements INodeType {
 				const credentials = await this.getCredentials('circusApi');
 				const apiUrl = credentials.apiUrl as string;
 				const baseUrl = `${apiUrl}/api/machine/workflow-executions/${workflowExecutionId}`;
+				const registrationUrl = `${baseUrl}/logs`;
 
 				try {
 					await this.helpers.httpRequestWithAuthentication.call(
@@ -149,7 +151,7 @@ export class CircusInit implements INodeType {
 						'circusApi',
 						{
 							method: 'POST',
-							url: `${baseUrl}/logs`,
+							url: registrationUrl,
 							body: {
 								idempotency_key: randomUUID(),
 								external_execution_id: externalExecutionId,
@@ -164,9 +166,20 @@ export class CircusInit implements INodeType {
 							json: true,
 						},
 					);
-				} catch {
-					// Best-effort — do not fail the init if the log call fails.
-					// The execution can still proceed; logging is informational.
+				} catch (registrationError) {
+					// Fail the workflow — this call is how the platform learns the
+					// external_execution_id; without it the platform cannot monitor or
+					// stop this execution. Do not call /terminate: it would hit the same
+					// unreachable/misconfigured endpoint.
+					throw new NodeApiError(
+						this.getNode(),
+						registrationError as unknown as JsonObject,
+						{
+							message: `Failed to register execution start with Circus: ${(registrationError as Error).message}`,
+							description: `Request: POST ${registrationUrl}. Check the API URL in the Circus API credential.`,
+							itemIndex: i,
+						},
+					);
 				}
 
 				// Pass through the webhook output unchanged
@@ -175,7 +188,7 @@ export class CircusInit implements INodeType {
 					pairedItem: { item: i },
 				});
 			} catch (error) {
-				if (error instanceof NodeOperationError) {
+				if (error instanceof NodeApiError || error instanceof NodeOperationError) {
 					// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 					throw error;
 				}

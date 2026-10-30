@@ -23,7 +23,8 @@ interface AgentAssignment {
 	prompt_slug: string;
 	active_prompt_version_id: number;
 	prompt_text: string;
-	temperature: number;
+	// null/absent = the model doesn't accept temperature; omit it from the request
+	temperature?: number | null;
 	max_tokens: number;
 }
 
@@ -45,7 +46,7 @@ function buildProviderRequest(
 	systemContext: string | undefined,
 	promptText: string,
 	inputText: string | undefined,
-	temperature: number,
+	temperature: number | undefined,
 	maxTokens: number,
 	baseUrl: string,
 	apiKey: string,
@@ -72,9 +73,7 @@ function buildProviderRequest(
 				messages: userMessages,
 				max_tokens: maxTokens,
 			};
-			// TODO: Remove this workaround once the platform excludes temperature
-			// for models that don't support it
-			if (modelName !== 'claude-opus-4-8') {
+			if (temperature !== undefined) {
 				body.temperature = temperature;
 			}
 			if (systemContext) {
@@ -84,15 +83,18 @@ function buildProviderRequest(
 		}
 		case 'google': {
 			url = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}key=${apiKey}`;
+			const generationConfig: Record<string, unknown> = {
+				maxOutputTokens: maxTokens,
+			};
+			if (temperature !== undefined) {
+				generationConfig.temperature = temperature;
+			}
 			body = {
 				contents: userMessages.map((m) => ({
 					role: 'user',
 					parts: [{ text: m.content as string }],
 				})),
-				generationConfig: {
-					temperature,
-					maxOutputTokens: maxTokens,
-				},
+				generationConfig,
 			};
 			if (systemContext) {
 				body.system_instruction = { parts: [{ text: systemContext }] };
@@ -110,9 +112,11 @@ function buildProviderRequest(
 			body = {
 				model: modelName,
 				messages,
-				temperature,
 				max_tokens: maxTokens,
 			};
+			if (temperature !== undefined) {
+				body.temperature = temperature;
+			}
 			break;
 		}
 	}
@@ -380,12 +384,13 @@ export class CircusAgent implements INodeType {
 					await throwValidationError('max_tokens must be a positive integer');
 					return [[]];
 				}
+				const temperature = agentConfig.temperature ?? undefined;
 				if (
-					agentConfig.temperature < 0 ||
-					agentConfig.temperature > 2
+					temperature !== undefined &&
+					(typeof temperature !== 'number' || temperature < 0 || temperature > 2)
 				) {
 					await throwValidationError(
-						'temperature must be between 0 and 2 (inclusive)',
+						'temperature must be a number between 0 and 2 (inclusive), or null to omit it',
 					);
 					return [[]];
 				}
@@ -484,7 +489,7 @@ export class CircusAgent implements INodeType {
 					systemContext,
 					agentConfig.prompt_text,
 					inputText || undefined,
-					agentConfig.temperature,
+					temperature,
 					agentConfig.max_tokens,
 					agentConfig.model_base_url,
 					providerApiKey,
